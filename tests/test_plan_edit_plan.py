@@ -70,27 +70,14 @@ import json
 import pytest
 
 from core.tools._kernel._plan import delete_plan, edit_plan, make_plan
-
-
-def _phase(**overrides):
-    """构造标准阶段字典，overrides 覆盖默认字段。"""
-    phase = {
-        "phase_id": "p1",
-        "phase_name": "阶段一",
-        "phase_status": "pending",
-        "phase_description": "描述一",
-    }
-    phase.update(overrides)
-    return phase
-
-
-def _plan2():
-    """标准两阶段计划。"""
-    return [_phase(), _phase(phase_id="p2", phase_name="阶段二")]
+from tests.helpers import _phase, _plan2
 
 
 def test_edit_plan_update_name_success():
-    """验证更新 phase_name 成功且其余字段不变。"""
+    """验证更新 phase_name 成功且其余字段不变。
+
+    部分更新语义：仅目标字段变化，status/description 及未涉及阶段保持不变。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "新阶段一"}], _plan2()))
     assert result["status"] == "ok"
     assert result["plan"][0]["phase_name"] == "新阶段一"
@@ -99,21 +86,30 @@ def test_edit_plan_update_name_success():
 
 
 def test_edit_plan_update_status_success():
-    """验证更新 phase_status 成功。"""
+    """验证更新 phase_status 成功。
+
+    状态字段在合法值集合内可自由切换。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_status": "in_progress"}], _plan2()))
     assert result["status"] == "ok"
     assert result["plan"][0]["phase_status"] == "in_progress"
 
 
 def test_edit_plan_update_description_success():
-    """验证更新 phase_description 成功。"""
+    """验证更新 phase_description 成功。
+
+    描述字段可独立更新，不影响其他字段。
+    """
     result = json.loads(edit_plan([{"phase_id": "p2", "phase_description": "新描述"}], _plan2()))
     assert result["status"] == "ok"
     assert result["plan"][1]["phase_description"] == "新描述"
 
 
 def test_edit_plan_update_all_fields_success():
-    """验证三字段同时更新成功。"""
+    """验证三字段同时更新成功。
+
+    单条 update 可同时携带 name/status/description 三个可更新字段。
+    """
     update = {"phase_id": "p1", "phase_name": "新名", "phase_status": "done",
               "phase_description": "新描述"}
     result = json.loads(edit_plan([update], _plan2()))
@@ -124,7 +120,10 @@ def test_edit_plan_update_all_fields_success():
 
 
 def test_edit_plan_multiple_phases_updated():
-    """验证一次调用更新多个阶段（不同 phase_id）。"""
+    """验证一次调用更新多个阶段。
+
+    不同 phase_id 的 update 在同一次调用内全部生效。
+    """
     result = json.loads(edit_plan([
         {"phase_id": "p1", "phase_status": "done"},
         {"phase_id": "p2", "phase_name": "阶段二改"},
@@ -135,7 +134,10 @@ def test_edit_plan_multiple_phases_updated():
 
 
 def test_edit_plan_same_phase_multiple_updates():
-    """验证同阶段多次 update 顺序应用且计数去重。"""
+    """验证同阶段多次 update 顺序应用且计数去重。
+
+    同一 phase_id 的多条 update 按顺序依次应用，消息计数去重。
+    """
     result = json.loads(edit_plan([
         {"phase_id": "p1", "phase_name": "改名"},
         {"phase_id": "p1", "phase_status": "done"},
@@ -147,14 +149,20 @@ def test_edit_plan_same_phase_multiple_updates():
 
 
 def test_edit_plan_unupdated_fields_kept():
-    """验证未传字段保持不变（部分更新语义）。"""
+    """验证未传字段保持不变（部分更新语义）。
+
+    update 只写显式给出的字段，其余字段原样保留。
+    """
     result = json.loads(edit_plan([{"phase_id": "p2", "phase_status": "in_progress"}], _plan2()))
     assert result["plan"][1]["phase_name"] == "阶段二"
     assert result["plan"][1]["phase_description"] == "描述一"
 
 
 def test_edit_plan_original_plan_untouched():
-    """验证副本语义：更新后传入的原始 plan 不被修改。"""
+    """验证副本语义：更新后传入的原始 plan 不被修改。
+
+    工具在副本上操作，调用方持有的 plan 必须保持原样。
+    """
     original = _plan2()
     edit_plan([{"phase_id": "p1", "phase_name": "改名"}], original)
     assert original[0]["phase_name"] == "阶段一"
@@ -162,14 +170,20 @@ def test_edit_plan_original_plan_untouched():
 
 
 def test_edit_plan_update_id_with_spaces():
-    """验证 update 的 phase_id strip 后匹配（" p1 " 命中 p1）。"""
+    """验证 update 的 phase_id strip 后匹配。
+
+    " p1 " 等带空白 id 归一化后命中 p1。
+    """
     result = json.loads(edit_plan([{"phase_id": " p1 ", "phase_name": "改名"}], _plan2()))
     assert result["status"] == "ok"
     assert result["plan"][0]["phase_name"] == "改名"
 
 
 def test_edit_plan_plan_id_with_spaces():
-    """验证 plan 内 id 带空格也能被 strip 后的 update id 命中。"""
+    """验证 plan 内 id 带空格也能被 strip 后的 update id 命中。
+
+    匹配双方均做 strip 归一化，兼容任意一侧带空白。
+    """
     plan = [_phase(phase_id=" p1 "), _phase(phase_id="p2", phase_name="阶段二")]
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "改名"}], plan))
     assert result["status"] == "ok"
@@ -177,7 +191,10 @@ def test_edit_plan_plan_id_with_spaces():
 
 
 def test_edit_plan_values_stripped_on_store():
-    """验证 name/description 更新值 strip 后存储。"""
+    """验证 name/description 更新值 strip 后存储。
+
+    更新值与创建时一致，去除首尾空白后落库。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "  改名  ",
                                     "phase_description": "  新描述  "}], _plan2()))
     assert result["status"] == "ok"
@@ -186,20 +203,29 @@ def test_edit_plan_values_stripped_on_store():
 
 
 def test_edit_plan_status_requires_exact_value():
-    """验证 status 集合精确匹配：带空白状态拒绝。"""
+    """验证 status 集合精确匹配。
+
+    带空白的状态值 " done " 不做 strip，必须精确命中集合。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_status": " done "}], _plan2()))
     assert result["status"] == "error"
     assert "phase_status must be one of" in result["message"]
 
 
 def test_edit_plan_ok_message_lists_updated_ids():
-    """验证 ok 消息列出更新 id。"""
+    """验证 ok 消息列出更新 id。
+
+    消息格式 "Updated N phase(s): id1, id2." 是响应契约的一部分。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "a"}], _plan2()))
     assert result["message"] == "Updated 1 phase(s): p1."
 
 
 def test_edit_plan_ok_message_dedup_same_phase():
-    """验证同阶段多 update 消息去重计数（不重复列出 id）。"""
+    """验证同阶段多 update 消息去重计数。
+
+    同一 id 被多次更新时消息只出现一次，计数不重复。
+    """
     result = json.loads(edit_plan([
         {"phase_id": "p1", "phase_name": "a"},
         {"phase_id": "p1", "phase_status": "done"},
@@ -208,7 +234,10 @@ def test_edit_plan_ok_message_dedup_same_phase():
 
 
 def test_edit_plan_ok_message_order_matches_updates():
-    """验证消息 id 顺序与 updates 顺序一致。"""
+    """验证消息 id 顺序与 updates 顺序一致。
+
+    消息中的 id 列表保持输入顺序，不按 plan 顺序或字典序重排。
+    """
     result = json.loads(edit_plan([
         {"phase_id": "p2", "phase_name": "a"},
         {"phase_id": "p1", "phase_status": "done"},
@@ -217,20 +246,29 @@ def test_edit_plan_ok_message_order_matches_updates():
 
 
 def test_edit_plan_ok_response_contract():
-    """验证 ok 响应仅 status/message/plan 三字段（契约稳定性）。"""
+    """验证 ok 响应仅 status/message/plan 三字段。
+
+    字段集合必须精确等于三字段，防止未来新增字段破坏契约。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "a"}], _plan2()))
     assert set(result.keys()) == {"status", "message", "plan"}
 
 
 def test_edit_plan_error_response_has_no_plan():
-    """验证 error 响应不含 plan 字段。"""
+    """验证 error 响应不含 plan 字段。
+
+    失败时不返回 plan，避免调用方误把失败结果当有效数据。
+    """
     result = json.loads(edit_plan([{"phase_id": "nope", "phase_name": "a"}], _plan2()))
     assert result["status"] == "error"
     assert "plan" not in result
 
 
 def test_edit_plan_updates_empty_list():
-    """验证空 updates 拒绝。"""
+    """验证空 updates 拒绝。
+
+    无更新项的调用没有意义，必须显式拒绝。
+    """
     result = json.loads(edit_plan([], _plan2()))
     assert result["status"] == "error"
     assert "non-empty list" in result["message"]
@@ -238,14 +276,20 @@ def test_edit_plan_updates_empty_list():
 
 @pytest.mark.parametrize("updates", [None, {"a": 1}, 123])
 def test_edit_plan_updates_type_invalid(updates):
-    """参数化验证 updates 为 None/dict/int 拒绝。"""
+    """参数化验证 updates 为 None/dict/int 拒绝。
+
+    非列表输入统一按类型错误处理。
+    """
     result = json.loads(edit_plan(updates, _plan2()))
     assert result["status"] == "error"
     assert "non-empty list" in result["message"]
 
 
 def test_edit_plan_updates_json_string_success():
-    """验证 updates 为 JSON 字符串（模型只输出 str 场景）更新成功。"""
+    """验证 updates 为 JSON 字符串（模型只输出 str 场景）更新成功。
+
+    工具必须兼容 str 形态输入，结果与 dict 列表输入一致。
+    """
     result = json.loads(edit_plan(json.dumps([{"phase_id": "p1", "phase_name": "改名"}]), _plan2()))
     assert result["status"] == "ok"
     assert result["plan"][0]["phase_name"] == "改名"
@@ -259,7 +303,10 @@ def test_edit_plan_updates_json_string_success():
     ("[]", "non-empty list"),
 ])
 def test_edit_plan_updates_json_string_invalid(updates, expected):
-    """参数化验证 JSON 字符串各非法形态：语法错误拒绝、解析成功但非列表拒绝。"""
+    """参数化验证 JSON 字符串各非法形态。
+
+    语法错误（not a JSON string）与解析成功但非列表（non-empty list）两类拒绝。
+    """
     result = json.loads(edit_plan(updates, _plan2()))
     assert result["status"] == "error"
     assert expected in result["message"]
@@ -267,14 +314,20 @@ def test_edit_plan_updates_json_string_invalid(updates, expected):
 
 @pytest.mark.parametrize("update", ["x", 123, None, [1]])
 def test_edit_plan_update_element_type_invalid(update):
-    """参数化验证 update 元素为 str/int/None/list 拒绝。"""
+    """参数化验证 update 元素为 str/int/None/list 拒绝。
+
+    元素必须是 dict，其余类型统一报 must be a dict。
+    """
     result = json.loads(edit_plan([update], _plan2()))
     assert result["status"] == "error"
     assert "must be a dict" in result["message"]
 
 
 def test_edit_plan_update_missing_phase_id():
-    """验证 update 缺 phase_id 拒绝。"""
+    """验证 update 缺 phase_id 拒绝。
+
+    phase_id 是定位键，缺失时无法确定目标阶段。
+    """
     result = json.loads(edit_plan([{"phase_name": "x"}], _plan2()))
     assert result["status"] == "error"
     assert "missing 'phase_id'" in result["message"]
@@ -282,21 +335,30 @@ def test_edit_plan_update_missing_phase_id():
 
 @pytest.mark.parametrize("phase_id", ["", "   ", 123, None])
 def test_edit_plan_update_phase_id_invalid(phase_id):
-    """参数化验证 update 的 phase_id 为空/空白/非字符串/None 拒绝。"""
+    """参数化验证 update 的 phase_id 为空/空白/非字符串/None 拒绝。
+
+    非空字符串是定位键的唯一合法形态。
+    """
     result = json.loads(edit_plan([{"phase_id": phase_id, "phase_name": "x"}], _plan2()))
     assert result["status"] == "error"
     assert "phase_id must be a non-empty string" in result["message"]
 
 
 def test_edit_plan_update_phase_id_only_rejected():
-    """验证只传 phase_id（无更新字段）拒绝。"""
+    """验证只传 phase_id（无更新字段）拒绝。
+
+    没有任何可更新字段的 update 是空操作，必须显式拒绝。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1"}], _plan2()))
     assert result["status"] == "error"
     assert "no fields to update" in result["message"]
 
 
 def test_edit_plan_update_extra_field_rejected():
-    """验证额外字段拒绝（白名单契约）。"""
+    """验证额外字段拒绝。
+
+    字段白名单契约，未知字段一律拒绝并点名。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_extra": 1}], _plan2()))
     assert result["status"] == "error"
     assert "unknown fields" in result["message"]
@@ -304,14 +366,20 @@ def test_edit_plan_update_extra_field_rejected():
 
 
 def test_edit_plan_update_multiple_extra_sorted():
-    """验证多额外字段 sorted 列出（消息确定性）。"""
+    """验证多额外字段 sorted 列出。
+
+    sorted 排序保证消息确定性，方便断言与回归。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "z_field": 1, "a_field": 2}], _plan2()))
     assert result["status"] == "error"
     assert "['a_field', 'z_field']" in result["message"]
 
 
 def test_edit_plan_update_rename_id_rejected():
-    """验证试图改 phase_id 本身被拒：phase_id 是定位键，新 id 字段属额外字段。"""
+    """验证试图改 phase_id 本身被拒。
+
+    phase_id 是定位键，新 id 字段（phase_id_new）属额外字段被拒绝。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_id_new": "p9"}], _plan2()))
     assert result["status"] == "error"
     assert "unknown fields" in result["message"]
@@ -319,7 +387,10 @@ def test_edit_plan_update_rename_id_rejected():
 
 
 def test_edit_plan_update_non_string_key_rejected():
-    """验证非字符串 key 拒绝（sorted(extra) 崩溃防护）。"""
+    """验证非字符串 key 拒绝。
+
+    防止 sorted(extra) 对混合类型 key 排序时崩溃，须提前拦截。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", 1: "x"}], _plan2()))
     assert result["status"] == "error"
     assert "keys must be strings" in result["message"]
@@ -327,14 +398,20 @@ def test_edit_plan_update_non_string_key_rejected():
 
 @pytest.mark.parametrize("phase_status", [["done"], {"a": 1}, 123, None, "donex", True])
 def test_edit_plan_update_status_invalid(phase_status):
-    """参数化验证 status 为 list/dict/int/None/非法值/bool 拒绝（不可哈希防护）。"""
+    """参数化验证 status 非法形态拒绝。
+
+    list/dict 等不可哈希输入须在集合成员判断前拦截，避免 TypeError。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_status": phase_status}], _plan2()))
     assert result["status"] == "error"
     assert "phase_status must be one of" in result["message"]
 
 
 def test_edit_plan_update_status_message_format():
-    """验证状态错误消息格式："one of [...], got 'x'."（空格分隔）。"""
+    """验证状态错误消息格式。
+
+    消息为 "one of [...], got 'x'."（空格分隔），是稳定契约。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_status": "xxx"}], _plan2()))
     assert result["status"] == "error"
     assert "one of ['done', 'in_progress', 'pending'], got 'xxx'" in result["message"]
@@ -342,7 +419,10 @@ def test_edit_plan_update_status_message_format():
 
 @pytest.mark.parametrize("phase_name", ["", " ", 123, None])
 def test_edit_plan_update_name_invalid(phase_name):
-    """参数化验证 name 为空/空白/非字符串/None 拒绝。"""
+    """参数化验证 name 为空/空白/非字符串/None 拒绝。
+
+    名称必须是非空字符串，与创建时的校验一致。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": phase_name}], _plan2()))
     assert result["status"] == "error"
     assert "phase_name must be a non-empty string" in result["message"]
@@ -350,21 +430,30 @@ def test_edit_plan_update_name_invalid(phase_name):
 
 @pytest.mark.parametrize("phase_description", ["", " ", 123, None])
 def test_edit_plan_update_description_invalid(phase_description):
-    """参数化验证 desc 为空/空白/非字符串/None 拒绝。"""
+    """参数化验证 desc 为空/空白/非字符串/None 拒绝。
+
+    描述必须是非空字符串，与创建时的校验一致。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_description": phase_description}], _plan2()))
     assert result["status"] == "error"
     assert "phase_description must be a non-empty string" in result["message"]
 
 
 def test_edit_plan_plan_none_rejected():
-    """验证 plan 为 None 拒绝。"""
+    """验证 plan 为 None 拒绝。
+
+    无计划状态下 edit 无对象可编辑，报 No plan exists。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "x"}], None))
     assert result["status"] == "error"
     assert "No plan exists" in result["message"]
 
 
 def test_edit_plan_plan_empty_rejected():
-    """验证空 plan 拒绝（须先 make_plan）。"""
+    """验证空 plan 拒绝（须先 make_plan）。
+
+    空列表与 None 同样视为无计划，统一报 No plan exists。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "x"}], []))
     assert result["status"] == "error"
     assert "No plan exists" in result["message"]
@@ -372,7 +461,10 @@ def test_edit_plan_plan_empty_rejected():
 
 @pytest.mark.parametrize("plan", ["[{}]", {"a": 1}, 123])
 def test_edit_plan_plan_non_list_rejected(plan):
-    """参数化验证 plan 为 str/dict/int 拒绝（类型防护）。"""
+    """参数化验证 plan 为 str/dict/int 拒绝。
+
+    类型防护：非列表输入一律视为无计划。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "x"}], plan))
     assert result["status"] == "error"
     assert "No plan exists" in result["message"]
@@ -380,21 +472,30 @@ def test_edit_plan_plan_non_list_rejected(plan):
 
 @pytest.mark.parametrize("plan", [["abc"], [{"phase_name": "x"}], [{"phase_id": "  "}], [{"phase_id": 1}]])
 def test_edit_plan_plan_element_invalid(plan):
-    """参数化验证 plan 元素非 dict/缺 id/空 id/非字符串 id 拒绝。"""
+    """参数化验证 plan 元素非 dict/缺 id/空 id/非字符串 id 拒绝。
+
+    元素校验消息定位 plan[i]，保证可诊断性。
+    """
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "x"}], plan))
     assert result["status"] == "error"
     assert "plan[0] must be a dict with a non-empty string phase_id" in result["message"]
 
 
 def test_edit_plan_phase_id_not_found():
-    """验证不存在的 phase_id 拒绝（带合法更新字段才能触达存在性检查）。"""
+    """验证不存在的 phase_id 拒绝。
+
+    带合法更新字段才能触达存在性检查，消息报告未找到的 id。
+    """
     result = json.loads(edit_plan([{"phase_id": "nope", "phase_name": "x"}], _plan2()))
     assert result["status"] == "error"
     assert "phase_id 'nope' not found in plan" in result["message"]
 
 
 def test_edit_plan_one_invalid_update_aborts_all():
-    """验证原子性：任一 update 非法整体失败，合法部分不生效且原 plan 不变。"""
+    """验证原子性：任一 update 非法整体失败。
+
+    合法部分不生效且原 plan 不变，error 响应不含 plan 字段。
+    """
     original = _plan2()
     result = json.loads(edit_plan([
         {"phase_id": "p1", "phase_name": "合法改名"},
@@ -407,14 +508,20 @@ def test_edit_plan_one_invalid_update_aborts_all():
 
 
 def test_edit_plan_failed_update_plan_untouched():
-    """验证校验失败后原 plan 不被修改（副本在检查通过后才创建）。"""
+    """验证校验失败后原 plan 不被修改。
+
+    副本在检查通过后才创建，失败路径完全不触碰调用方数据。
+    """
     original = _plan2()
     edit_plan([{"phase_id": "p1", "phase_status": "bad"}], original)
     assert original == _plan2()
 
 
 def test_edit_plan_error_index_localization():
-    """验证错误消息定位 updates[i] 索引。"""
+    """验证错误消息定位 updates[i] 索引。
+
+    错误消息包含问题 update 的位置，便于调用方快速定位。
+    """
     result = json.loads(edit_plan([
         {"phase_id": "p1", "phase_name": "a"},
         {"phase_id": "p2", "phase_status": "bad"},
@@ -424,7 +531,10 @@ def test_edit_plan_error_index_localization():
 
 
 def test_edit_plan_lifecycle_make_then_edit():
-    """生命周期：make 创建的 plan 可直接 edit。"""
+    """生命周期：make 创建的 plan 可直接 edit。
+
+    make 的返回 plan 是 edit 的合法输入，验证链式衔接。
+    """
     made = json.loads(make_plan([_phase(), _phase(phase_id="p2", phase_name="阶段二")]))
     result = json.loads(edit_plan([{"phase_id": "p2", "phase_status": "in_progress"}], made["plan"]))
     assert result["status"] == "ok"
@@ -432,7 +542,10 @@ def test_edit_plan_lifecycle_make_then_edit():
 
 
 def test_edit_plan_lifecycle_edit_after_edit():
-    """生命周期：连续两次 edit 基于上次结果推进状态。"""
+    """生命周期：连续两次 edit 基于上次结果推进状态。
+
+    每次 edit 的输出 plan 直接作为下一次的输入。
+    """
     made = json.loads(make_plan([_phase()]))
     once = json.loads(edit_plan([{"phase_id": "p1", "phase_status": "in_progress"}], made["plan"]))
     twice = json.loads(edit_plan([{"phase_id": "p1", "phase_status": "done"}], once["plan"]))
@@ -441,7 +554,10 @@ def test_edit_plan_lifecycle_edit_after_edit():
 
 
 def test_edit_plan_lifecycle_edit_deleted_phase():
-    """生命周期：delete 后 edit 已删 id 拒绝。"""
+    """生命周期：delete 后 edit 已删 id 拒绝。
+
+    已删除阶段不在最新快照中，编辑操作报 not found。
+    """
     made = json.loads(make_plan([_phase(), _phase(phase_id="p2", phase_name="阶段二")]))
     deleted = json.loads(delete_plan("p2", made["plan"]))
     result = json.loads(edit_plan([{"phase_id": "p2", "phase_name": "x"}], deleted["plan"]))
@@ -450,7 +566,10 @@ def test_edit_plan_lifecycle_edit_deleted_phase():
 
 
 def test_edit_plan_lifecycle_edit_empty_after_delete_all():
-    """生命周期：delete_all 清空后 edit 拒绝（无计划可编辑）。"""
+    """生命周期：delete_all 清空后 edit 拒绝。
+
+    无计划可编辑时统一报 No plan exists。
+    """
     made = json.loads(make_plan([_phase()]))
     cleared = json.loads(delete_plan("p1", made["plan"], delete_all=True))
     result = json.loads(edit_plan([{"phase_id": "p1", "phase_name": "x"}], cleared["plan"]))
@@ -459,7 +578,10 @@ def test_edit_plan_lifecycle_edit_empty_after_delete_all():
 
 
 def test_edit_plan_lifecycle_make_edit_full_flow():
-    """生命周期：make 3 阶段 → 一次 edit 2 个 update（不同阶段）全部生效。"""
+    """生命周期：make 3 阶段 → 一次 edit 2 个 update。
+
+    不同阶段的 update 在一次调用内全部生效，消息按输入顺序列出。
+    """
     made = json.loads(make_plan([
         _phase(), _phase(phase_id="p2", phase_name="阶段二"), _phase(phase_id="p3", phase_name="阶段三")]))
     result = json.loads(edit_plan([
@@ -474,7 +596,10 @@ def test_edit_plan_lifecycle_make_edit_full_flow():
 
 
 def test_edit_plan_lifecycle_make_edit_delete_edit_remaining():
-    """混合：make → edit → delete → 编辑剩余阶段成功、编辑已删 id 拒绝（同一快照内对照）。"""
+    """混合：make → edit → delete → 编辑剩余阶段成功、编辑已删 id 拒绝。
+
+    同一快照内对照验证：已删 id 报 not found，剩余阶段仍可编辑。
+    """
     made = json.loads(make_plan([_phase(), _phase(phase_id="p2", phase_name="阶段二"),
                                  _phase(phase_id="p3", phase_name="阶段三")]))
     edited = json.loads(edit_plan([{"phase_id": "p1", "phase_status": "done"}], made["plan"]))
@@ -488,7 +613,10 @@ def test_edit_plan_lifecycle_make_edit_delete_edit_remaining():
 
 
 def test_edit_plan_lifecycle_atomic_failure_then_retry():
-    """混合：edit 原子失败后 plan 状态未被污染，修正后基于原快照重试成功。"""
+    """混合：edit 原子失败后 plan 状态未被污染，修正后重试成功。
+
+    失败调用不改变任何数据，可基于原快照直接重试。
+    """
     made = json.loads(make_plan([_phase()]))
     failed = json.loads(edit_plan([
         {"phase_id": "p1", "phase_name": "改名"},
@@ -502,7 +630,10 @@ def test_edit_plan_lifecycle_atomic_failure_then_retry():
 
 
 def test_edit_plan_lifecycle_progress_all_phases():
-    """混合：多轮 edit 将全部阶段状态逐步推进到 done（状态机轮转）。"""
+    """混合：多轮 edit 将全部阶段状态逐步推进到 done。
+
+    验证 pending → in_progress → done 的状态机轮转跨调用可用。
+    """
     made = json.loads(make_plan([_phase(), _phase(phase_id="p2", phase_name="阶段二")]))
     round1 = json.loads(edit_plan([
         {"phase_id": "p1", "phase_status": "in_progress"},
@@ -519,7 +650,10 @@ def test_edit_plan_lifecycle_progress_all_phases():
 
 
 def test_edit_plan_lifecycle_make_delete_edit_remaining():
-    """混合：make → delete → 编辑剩余阶段成功（无 edit 中间步的对照链）。"""
+    """混合：make → delete → 编辑剩余阶段成功。
+
+    无 edit 中间步的对照链，删除后剩余阶段保持可编辑。
+    """
     made = json.loads(make_plan([_phase(), _phase(phase_id="p2", phase_name="阶段二")]))
     deleted = json.loads(delete_plan("p2", made["plan"]))
     assert deleted["status"] == "ok"
@@ -530,7 +664,10 @@ def test_edit_plan_lifecycle_make_delete_edit_remaining():
 
 
 def test_edit_plan_lifecycle_rebuild_chain():
-    """混合：make → edit → delete → 清空 → 重建 → edit 新阶段（edit 视角完整闭环）。"""
+    """混合：make → edit → delete → 清空 → 重建 → edit 新阶段。
+
+    edit 视角完整闭环，验证重建后的新 id 可正常编辑。
+    """
     made = json.loads(make_plan([_phase()]))
     edited = json.loads(edit_plan([{"phase_id": "p1", "phase_status": "done"}], made["plan"]))
     cleared = json.loads(delete_plan("p1", edited["plan"], delete_all=True))
@@ -543,7 +680,10 @@ def test_edit_plan_lifecycle_rebuild_chain():
 
 
 def test_edit_plan_lifecycle_stale_snapshot_editable():
-    """约定：plan 工具无内部状态，旧快照仍可编辑；调用方必须传递最新 plan。"""
+    """约定：plan 工具无内部状态，旧快照仍可编辑。
+
+    调用方必须传递最新 plan；旧快照中已删的 id 在新快照中才不可编辑。
+    """
     made = json.loads(make_plan([_phase(), _phase(phase_id="p2", phase_name="阶段二")]))
     deleted = json.loads(delete_plan("p2", made["plan"]))
     assert [p["phase_id"] for p in deleted["plan"]] == ["p1"]

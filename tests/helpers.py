@@ -6,6 +6,10 @@
 - make_indexed_file: 生成每行内容带行号的文件，用于校验行号与内容对应
 - make_text_file: 生成指定内容的文本文件（父目录自动创建）
 - rels: 将绝对路径列表转为相对路径集合（基于 realpath 归一化后的工作区根）
+- _phase: 构造标准阶段字典（plan 三工具测试统一造数）
+- _ok_phases: 构造 count 个互不重复的合法阶段
+- _plan2: 标准两阶段计划（p1/p2）
+- _plan3: 标准三阶段计划（p1/p2/p3）
 
 使用注意：
 - 本模块仅存放测试辅助函数，不包含测试用例
@@ -117,3 +121,44 @@ def rels(workspace, files: list[str]) -> set[str]:
     """
     abs_ws = os.path.realpath(str(workspace))
     return {os.path.relpath(f, abs_ws) for f in files}
+
+
+def _phase(**overrides):
+    """构造标准阶段字典，overrides 覆盖默认字段。
+
+    默认 phase_id="p1"/phase_name="阶段一"/phase_status="pending"/
+    phase_description="描述一"，供 make/edit/delete 三工具测试统一造数。
+    """
+    phase = {
+        "phase_id": "p1",
+        "phase_name": "阶段一",
+        "phase_status": "pending",
+        "phase_description": "描述一",
+    }
+    phase.update(overrides)
+    return phase
+
+
+def _ok_phases(count):
+    """构造 count 个互不重复的合法阶段。
+
+    每个阶段 phase_id 依次为 p0/p1/...，其余字段取 _phase 默认值，
+    用于上限边界（12）与超限（13）等批量造数场景。
+    """
+    return [_phase(phase_id=f"p{i}") for i in range(count)]
+
+
+def _plan2():
+    """标准两阶段计划（p1/p2）。
+
+    供 edit_plan/delete_plan 的常规用例直接使用。
+    """
+    return [_phase(), _phase(phase_id="p2", phase_name="阶段二")]
+
+
+def _plan3():
+    """标准三阶段计划（p1/p2/p3）。
+
+    供 edit_plan/delete_plan 的删除中间阶段、多阶段操作用例使用。
+    """
+    return [_phase(), _phase(phase_id="p2", phase_name="阶段二"), _phase(phase_id="p3", phase_name="阶段三")]
