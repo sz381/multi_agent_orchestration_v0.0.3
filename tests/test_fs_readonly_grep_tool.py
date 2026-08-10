@@ -72,13 +72,6 @@
   （search_timed_out），二者均不报错
 - 空结果：status=ok、total_matches=0、files_scanned 保留、无 page 字段
 
-使用注意：
-- grep_tree fixture 定义于 conftest.py（与 glob_tool 的 tree fixture 对齐）：行号与内容
-  一一对应，便于断言行号；标准树中 pattern "foo" 全量命中 8 条 / 5 个文件，各用例以此为基准
-- 二进制 / UTF-16 / 不可解码 / 大文件等特殊样本在各用例内临时构造，不污染标准树计数
-- 依赖 conftest.py 的 workspace / grep_tree fixture 与 tests/helpers.py 的 read_json / rels / make_file
-- 分页类用例基于 path="a.py"（单文件内匹配顺序按行号确定，避免 os.walk 顺序不稳定）
-
 测试用例数量：69
 """
 

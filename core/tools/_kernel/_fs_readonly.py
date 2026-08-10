@@ -1,20 +1,31 @@
 """工作区只读文件系统工具实现
 
 提供函数：
-- view_file: 读取文件内容，返回读取到的文件内容
-- glob_tool: 模式匹配查找目标文件，返回文件路径列表
-- grep_tool: 正则搜索文件内容，返回匹配行
+- view_file:        按行号读取文件内容，支持分段续读（单次最多 1MB）
+- glob_tool:        按 glob 模式匹配查找文件，支持 ** 递归与 fnmatch 通配
+- grep_tool:        正则搜索文件内容，支持三种输出模式与分页
 
 关键约束：
-- 所有工具统一返回 JSON 字符串（status: ok/error）
-- 路径默认限制在工作区内，allow_external_reads=True 时方可越界访问
+- 所有工具统一返回 JSON 字符串（status: ok/error），不抛异常
+  （唯一例外：workspace 未配置时抛 RuntimeError，属配置错误而非业务错误）
+- 路径默认限制在工作区内：realpath 归一化 + 边界前缀检查，
+  allow_external_reads=True 时方可越界访问；目录符号链接不跟随（防逃逸）
+- 返回路径均为工作区内绝对路径（realpath 归一化），三工具契约一致
 - EXCLUDE_DIRS / EXCLUDE_FILES 由 glob 与 grep 共享剪枝，既不返回也不进入
-- 1MB 读上限 + 200 结果 / 5000 扫描硬上限
+- 资源硬上限：MAX_READ_SIZE（单次读 1MB）、GLOB_MAX_RESULTS（200 结果）、
+  GLOB_MAX_SCAN / GREP_MAX_FILES（5000 扫描上限）、GREP_MAX_FILE_SIZE（10MB 单文件）
+- 二进制防护：读取前 NUL 字节嗅探（BINARY_SNIFF_BYTES），UTF-16/32 白名单放行；
+  命中判定后 view_file 返回 error，grep 静默跳过（批量扫描语义）
+- 超时熔断：正则单次匹配 REGEX_MATCH_TIMEOUT_SECONDS（防灾难性回溯），
+  grep 整次搜索另有 GREP_TOTAL_TIMEOUT_SECONDS wall-clock 总预算
 
 使用注意：
-- 大文件读取被截断时，用 offset=end_line+1 继续分段读取
-- 需扫描排除目录内部时，将 dir_path 直接指向该目录即可
-- grep 会跳过超过 GREP_MAX_FILE_SIZE（默认 10MB）的文件，并在响应中返回 skipped_large_files 统计
+- view_file 大文件分段读取：用 offset=end_line+1 续读，直至 has_more=False
+- glob_tool 需搜索排除目录内部时，将 dir_path 直接指向该目录即可
+- grep_tool 的 glob_pattern 只匹配文件名（basename），不支持 ** 与路径分隔符，
+  限定子目录请用 path 参数
+- grep_tool 超时返回已收集的部分结果：timed_out_files 为单行超时熔断计数，
+  search_timed_out=True 表示结果不完整（不是错误）
 - 本模块只读；写操作请使用 _fs_mutate
 """
 

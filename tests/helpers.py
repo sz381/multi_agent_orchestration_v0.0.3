@@ -4,6 +4,7 @@
 - read_json: 读取 JSON 字符串并返回 JSON 对象
 - make_file: 生成指定行数与行长的文本文件，返回文件路径
 - make_indexed_file: 生成每行内容带行号的文件，用于校验行号与内容对应
+- make_text_file: 生成指定内容的文本文件（父目录自动创建）
 - rels: 将绝对路径列表转为相对路径集合（基于 realpath 归一化后的工作区根）
 
 使用注意：
@@ -54,6 +55,27 @@ def make_file(
     with open(path, "w", encoding="utf-8") as f:
         for _ in range(line_count):
             f.write(line)
+    return path
+
+
+def make_text_file(workspace, name: str, content: str):
+    """生成指定内容的文本文件（父目录自动创建）。
+
+    与 make_file / make_indexed_file 的确定性造数不同，本函数接受任意
+    指定内容（含中文、多行、特殊字符），用于 str_replace 等写工具的
+    精确内容断言场景。
+
+    Args:
+        workspace: 目标目录，通常为 pytest 的 tmp_path fixture 返回值。
+        name:      文件名，可含子目录相对路径（如 "sub/a.py"）。
+        content:   要写入的完整文本内容。
+
+    Returns:
+        生成文件的完整路径（pathlib.Path）。
+    """
+    path = workspace / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
     return path
 
 
