@@ -15,6 +15,9 @@
 - MAX_WRITE_SIZE:                       最大写入大小   默认 1MB
 - MAX_DIFF_SIZE:                        最大差异大小   默认 50
 - CLEAN_MAX_ITEMS:                      最大清理项目数   默认 500
+- PLAN_MAX_PHASES:                      最大计划阶段数   默认 12
+- PHASE_VALID_STATUSES:                 阶段有效状态集合
+- PHASE_REQUIRED_FIELDS:                阶段必需字段集合
 """
 
 # _fs_readonly
@@ -48,3 +51,9 @@ GREP_TOTAL_TIMEOUT_SECONDS = 30.0
 MAX_WRITE_SIZE = 1 * 1024 * 1024
 MAX_DIFF_SIZE = 50
 CLEAN_MAX_ITEMS = 500
+
+# _plan
+PLAN_MAX_PHASES = 12
+PHASE_VALID_STATUSES = frozenset({"pending", "in_progress", "done"})
+PHASE_REQUIRED_FIELDS = frozenset({"phase_id", "phase_name", "phase_status", "phase_description"})
+PHASE_ALLOWED_UPDATE_FIELDS = frozenset({"phase_name", "phase_status", "phase_description"})
