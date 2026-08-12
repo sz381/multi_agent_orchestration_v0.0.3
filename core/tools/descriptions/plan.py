@@ -1,0 +1,40 @@
+"""
+计划管理工具集合（_plan）的工具描述
+
+工具表述包括:
+- make_plan                       从阶段列表中创建新的执行计划
+- edit_plan                       修改计划中的一个或多个阶段
+- delete_plan                     移除一个阶段或清空整个计划
+"""
+
+TOOL_DESCRIPTION = {
+    "make_plan": (
+        "Create an execution plan with phases. Use before fanout_subagents for "
+        "complex multi-phase work (e.g. research → implement → review). "
+        "After fanout results arrive, use edit_plan to update phase status.\n"
+        "Only call ONCE — it will fail if a plan already exists. "
+        "Use edit_plan to modify or delete_plan(delete_all=True) to reset.\n"
+        "Mutually exclusive with fanout_subagents/edit_plan/delete_plan — at most one control tool per round.\n"
+        "Params:\n"
+        "- phases: list of dicts, each with exactly:\n"
+        "    phase_id (unique string), phase_name (string),\n"
+        "    phase_status ('pending'|'in_progress'|'done'), phase_description (string)\n"
+        "Limits: max 12 phases. No extra fields allowed."
+    ),
+    "edit_plan": (
+        "Modify one or more plan phases in a single call (e.g. mark phases as in_progress/done).\n"
+        "Params:\n"
+        "- updates: list of dicts, each with phase_id (string, must exist) plus any of:\n"
+        "    phase_name, phase_status ('pending'|'in_progress'|'done'), phase_description\n"
+        "Example: [{\"phase_id\":\"1\",\"phase_status\":\"done\"}, {\"phase_id\":\"2\",\"phase_status\":\"in_progress\"}]\n"
+        "Do NOT call edit_plan multiple times in parallel — batch all updates in one call.\n"
+        "Mutually exclusive with fanout_subagents/make_plan/delete_plan — at most one control tool per round."
+    ),
+    "delete_plan": (
+        "Remove a phase or clear the entire plan.\n"
+        "Params:\n"
+        "- phase_id: the phase to remove (must exist, ignored if delete_all=True)\n"
+        "- delete_all: clear all phases (default False)\n"
+        "Mutually exclusive with fanout_subagents/make_plan/edit_plan — at most one control tool per round."
+    ),
+}

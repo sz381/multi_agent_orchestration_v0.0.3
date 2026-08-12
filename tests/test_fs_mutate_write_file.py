@@ -654,18 +654,18 @@ async def test_write_file_ascii_unencodable_rejected(workspace):
 async def test_write_file_diff_truncation(workspace):
     """diff 截断：验证超长 old/new 截断加标记、短文本原样。
 
-    60 字符内容超过 MAX_DIFF_SIZE（50）：
-    - diff.old / diff.new 截断为前 50 字符 + "\n... [truncated]"
+    600 字符内容超过 MAX_DIFF_SIZE（500）：
+    - diff.old / diff.new 截断为前 500 字符 + "\n... [truncated]"
     - 短文本（"y\n"）原样返回
     """
-    long_old = "x" * 60
+    long_old = "x" * 600
     make_text_file(workspace, "a.py", long_old)
-    r = read_json(await write_file("a.py", "y" * 60))
+    r = read_json(await write_file("a.py", "y" * 600))
     assert r["status"] == "ok"
-    assert r["diff"]["old"] == "x" * 50 + "\n... [truncated]"
-    assert r["diff"]["new"] == "y" * 50 + "\n... [truncated]"
+    assert r["diff"]["old"] == "x" * 500 + "\n... [truncated]"
+    assert r["diff"]["new"] == "y" * 500 + "\n... [truncated]"
     r = read_json(await write_file("a.py", "y\n"))
-    assert r["diff"]["old"] == "y" * 50 + "\n... [truncated]"
+    assert r["diff"]["old"] == "y" * 500 + "\n... [truncated]"
     assert r["diff"]["new"] == "y\n"
 
 
@@ -673,10 +673,10 @@ async def test_write_file_diff_truncation(workspace):
 async def test_write_file_diff_at_boundary(workspace):
     """diff 截断：边界：验证恰好 MAX_DIFF_SIZE 不截断。
 
-    old/new 恰好 50 字符：
+    old/new 恰好 500 字符：
     - 原样返回，无 "[truncated]" 标记
     """
-    content = "z" * 50
+    content = "z" * 500
     make_text_file(workspace, "a.py", content)
     r = read_json(await write_file("a.py", content))
     assert r["status"] == "ok"

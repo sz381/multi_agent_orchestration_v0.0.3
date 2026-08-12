@@ -580,17 +580,17 @@ async def test_str_replace_delete_content(workspace):
 async def test_str_replace_diff_truncation(workspace):
     """替换语义：diff 截断：验证超长 old/new 截断加标记、短文本原样。
 
-    60 字符文本超过 MAX_DIFF_SIZE（50）：
-    - diff.old / diff.new 截断为前 50 字符 + "\n... [truncated]"
+    600 字符文本超过 MAX_DIFF_SIZE（500）：
+    - diff.old / diff.new 截断为前 500 字符 + "\n... [truncated]"
     - 短文本（"y\n"）原样返回
     """
-    long_old = "x" * 60
-    long_new = "y" * 60
+    long_old = "x" * 600
+    long_new = "y" * 600
     fp = make_text_file(workspace, "b.py", long_old + "\n")
     r = read_json(await str_replace("b.py", long_old, long_new))
     assert r["status"] == "ok"
-    assert r["diff"]["old"] == "x" * 50 + "\n... [truncated]"
-    assert r["diff"]["new"] == "y" * 50 + "\n... [truncated]"
+    assert r["diff"]["old"] == "x" * 500 + "\n... [truncated]"
+    assert r["diff"]["new"] == "y" * 500 + "\n... [truncated]"
     assert fp.read_text(encoding="utf-8") == long_new + "\n"
     r = read_json(await str_replace("b.py", "y\n", "zz\n"))
     assert r["diff"]["old"] == "y\n"

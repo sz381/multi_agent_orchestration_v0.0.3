@@ -13,7 +13,7 @@
 - REGEX_MATCH_TIMEOUT_SECONDS:          正则单次匹配操作超时（防灾难性回溯）   默认 2s
 - GREP_TOTAL_TIMEOUT_SECONDS:           grep_tool 整次搜索总时长预算（wall-clock）   默认 30s
 - MAX_WRITE_SIZE:                       最大写入大小   默认 1MB
-- MAX_DIFF_SIZE:                        最大差异大小   默认 50
+- MAX_DIFF_SIZE:                        最大差异大小   默认 500
 - CLEAN_MAX_ITEMS:                      最大清理项目数   默认 500
 - PLAN_MAX_PHASES:                      最大计划阶段数   默认 12
 - PHASE_VALID_STATUSES:                 阶段有效状态集合
@@ -65,7 +65,7 @@ GREP_TOTAL_TIMEOUT_SECONDS = 30.0
 
 # _fs_mutate
 MAX_WRITE_SIZE = 1 * 1024 * 1024
-MAX_DIFF_SIZE = 50
+MAX_DIFF_SIZE = 500
 CLEAN_MAX_ITEMS = 500
 
 # _plan
