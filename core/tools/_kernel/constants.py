@@ -18,6 +18,12 @@
 - PLAN_MAX_PHASES:                      最大计划阶段数   默认 12
 - PHASE_VALID_STATUSES:                 阶段有效状态集合
 - PHASE_REQUIRED_FIELDS:                阶段必需字段集合
+- PHASE_ALLOWED_UPDATE_FIELDS:          阶段允许更新字段集合
+- MAX_RESPONSE_LENGTH:                  最大响应长度   默认 100K
+- MAX_TASKS:                            最大任务数     默认 20, subagent 并发数量限制
+- REQUIRED_TASK_FIELDS:                 任务必需字段集合
+- ALLOWED_OPTIONAL_FIELDS:              任务允许的可选字段集合, 这个是给 subagent 的 system prompt 注入指定 working directory 用的
+- AVAILABLE_SUBAGENT_PREFIXES:          可用的 subagent 前缀集合
 """
 
 # _fs_readonly
@@ -57,3 +63,13 @@ PLAN_MAX_PHASES = 12
 PHASE_VALID_STATUSES = frozenset({"pending", "in_progress", "done"})
 PHASE_REQUIRED_FIELDS = frozenset({"phase_id", "phase_name", "phase_status", "phase_description"})
 PHASE_ALLOWED_UPDATE_FIELDS = frozenset({"phase_name", "phase_status", "phase_description"})
+
+# _orch_control
+MAX_RESPONSE_LENGTH = 100_000
+MAX_TASKS = 20
+REQUIRED_TASK_FIELDS = {
+    "task_id", "task_name", "task_description",
+    "task_completion_status", "subagent_id", "subagent_name",
+}
+ALLOWED_OPTIONAL_FIELDS = {"project_dir"}
+AVAILABLE_SUBAGENT_PREFIXES = ["programmer", "reviewer", "researcher"]

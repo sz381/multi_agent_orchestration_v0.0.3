@@ -10,6 +10,8 @@
 - _ok_phases: 构造 count 个互不重复的合法阶段
 - _plan2: 标准两阶段计划（p1/p2）
 - _plan3: 标准三阶段计划（p1/p2/p3）
+- _task: 构造标准任务字典（fanout_subagents 测试统一造数）
+- _ok_tasks: 构造 count 个互不重复的合法任务
 
 使用注意：
 - 本模块仅存放测试辅助函数，不包含测试用例
@@ -162,3 +164,37 @@ def _plan3():
     供 edit_plan/delete_plan 的删除中间阶段、多阶段操作用例使用。
     """
     return [_phase(), _phase(phase_id="p2", phase_name="阶段二"), _phase(phase_id="p3", phase_name="阶段三")]
+
+
+def _task(**overrides):
+    """构造标准任务字典，overrides 覆盖默认字段。
+
+    默认 task_id="t1"/task_name="任务一"/task_description="描述一"/
+    task_completion_status=False/subagent_id="programmer_a"/
+    subagent_name="程序员甲"，供 fanout_subagents 测试统一造数。
+    """
+    task = {
+        "task_id": "t1",
+        "task_name": "任务一",
+        "task_description": "描述一",
+        "task_completion_status": False,
+        "subagent_id": "programmer_a",
+        "subagent_name": "程序员甲",
+    }
+    task.update(overrides)
+    return task
+
+
+def _ok_tasks(count):
+    """构造 count 个互不重复的合法任务。
+
+    每个任务 task_id 依次为 t0/t1/...，subagent_id 在三个合法前缀
+    （programmer/reviewer/researcher）间轮换（如 programmer_0/reviewer_1/...），
+    用于上限边界（20）与超限（21）等批量造数场景。
+    """
+    prefixes = ["programmer", "reviewer", "researcher"]
+    tasks = []
+    for i in range(count):
+        prefix = prefixes[i % len(prefixes)]
+        tasks.append(_task(task_id=f"t{i}", subagent_id=f"{prefix}_{i}"))
+    return tasks
