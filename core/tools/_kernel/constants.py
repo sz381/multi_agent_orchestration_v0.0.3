@@ -24,6 +24,16 @@
 - REQUIRED_TASK_FIELDS:                 任务必需字段集合
 - ALLOWED_OPTIONAL_FIELDS:              任务允许的可选字段集合, 这个是给 subagent 的 system prompt 注入指定 working directory 用的
 - AVAILABLE_SUBAGENT_PREFIXES:          可用的 subagent 前缀集合
+- BLACKLIST_PATTERNS:                   bash 命令黑名单正则集合（纵深防御，Seatbelt 沙箱为第一道防线）
+- BASH_MAX_OUTPUT_CHARS:                bash 单路（stdout/stderr）返回给模型的最大字符数   默认 806
+- KILL_ALLOWED_PORTS:                   kill_specific_process 端口段白名单（含两端）   默认 (3000,3100)/(5000,5200)/(8000,8100)
+- KILL_GRACE_SECONDS:                   SIGTERM 后等待优雅退出的秒数   默认 3
+- KILL_CONFIRM_SECONDS:                 SIGKILL 后确认退出的秒数   默认 2
+- KILL_POLL_INTERVAL:                   退出探测轮询间隔（秒）   默认 0.2
+- KILL_SYSTEM_PROCESS_NAMES:            kill_specific_process 拒绝的系统进程名集合
+- SANDBOX_MAX_OUTPUT_CHARS:             沙箱单路（stdout/stderr）输出内存保护上限   默认 5000
+- SANDBOX_ENV_STRIP:                    子进程环境中剔除的代理相关变量集合（防误用代理 Python 环境）
+- SANDBOX_SENSITIVE_ENV_KEYWORDS:       环境变量名含这些关键字即视为敏感，不传入子进程
 """
 
 # _fs_readonly
@@ -73,3 +83,42 @@ REQUIRED_TASK_FIELDS = {
 }
 ALLOWED_OPTIONAL_FIELDS = {"project_dir"}
 AVAILABLE_SUBAGENT_PREFIXES = ["programmer", "reviewer", "researcher"]
+
+# _bash
+BLACKLIST_PATTERNS = [
+    r"\brm\s+-rf\s+/",
+    r"-rf\s+/",
+    r"\bsudo\b",
+    r"\bchmod\s+777",
+    r"\bmkfs\.",
+    r"\bdd\s+if=",
+    r">\s*/dev/sd",
+    r"\bcurl.*\|\s*(\$\(.*\)|(ba)?sh)",
+    r"\bwget.*\|\s*(\$\(.*\)|(ba)?sh)",
+    r"\bbase64\b.*\|\s*(ba)?sh",
+    r"\bpython.*-c.*base64.*\|.*sh",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r":\(\)\s*\{\s*:\|:&\s*\}\s*;:",
+]
+BASH_MAX_OUTPUT_CHARS = 806
+KILL_ALLOWED_PORTS = ((3000, 3100), (5000, 5200), (8000, 8100))
+KILL_GRACE_SECONDS = 3
+KILL_CONFIRM_SECONDS = 2
+KILL_POLL_INTERVAL = 0.2
+KILL_SYSTEM_PROCESS_NAMES = frozenset({
+    "kernel_task", "launchd", "WindowServer", "loginwindow",
+    "syslogd", "notifyd", "cfprefsd", "configd", "syspolicyd",
+    "amfid", "opendirectoryd", "mds", "mdworker", "backupd",
+})
+
+# sandbox
+SANDBOX_MAX_OUTPUT_CHARS = 5000
+SANDBOX_ENV_STRIP = frozenset({
+    "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "PYTHONHOME", "PYTHONPATH",
+    "GOPATH", "NODE_PATH", "PERL5LIB", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+})
+SANDBOX_SENSITIVE_ENV_KEYWORDS = [
+    "API_KEY", "API_SECRET", "TOKEN", "SECRET", "PASSWORD",
+    "CREDENTIAL", "PRIVATE_KEY",
+]

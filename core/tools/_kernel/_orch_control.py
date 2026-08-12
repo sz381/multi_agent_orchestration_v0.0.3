@@ -6,10 +6,34 @@
 - fanout_subagents:         派遣子代理
 
 关键约束：
-- 
+- 所有工具统一返回 JSON 字符串（status: ok/error），不抛异常（except 兜底）
+- 纯函数：不直接修改 StateGraph，通过返回 JSON 让 bundle 层用
+  Command(update=...) 写入编排状态（分层规范：Kernel 纯函数 + Bundle 异步 Command）
+- 调用级防护优先：current_response/current_tasks 非空即视为本轮已调用过，
+  拒绝重复调用（防并发的 last-win，优先于参数级校验）
+- 布尔状态闸门：should_orch_end/should_orch_pause 必须为 bool
+  （字符串 "false" 是 truthy，误传会放行）且为 False 时拒绝操作
+- 检查顺序契约：end_orchestration 按 current_response → should_orch_end →
+  plan → response 依次校验，同输入多违例时只报第一个
+- plan 校验：必须是 list 或 None；元素为含非空字符串 phase_id 的字典；
+  存在未完成阶段（phase_status != "done"）时拒绝结束并列出 phase_id
+- response 校验：非空字符串（strip 后参与长度校验），上限 MAX_RESPONSE_LENGTH
+- fanout 校验链：tasks 须为非空列表（上限 MAX_TASKS）；元素为字典且字段白名单
+  （6 必填 + project_dir 可选）；task_id 同轮唯一；subagent_id 前缀必须在
+  AVAILABLE_SUBAGENT_PREFIXES 内且同轮唯一（每个子代理一轮一个任务）；
+  task_completion_status 必须精确为 False
+- 清理输出：所有文本字段 strip 后存储；project_dir 空值时剔除
 
 使用注意：
-- 
+- 状态快照由 bundle 层从 StateGraph 读取并作为参数传入
+  （current_response/current_tasks/should_orch_end/should_orch_pause）
+- 控制类工具须配合 ControlAwareToolNode 使用：本轮独占，一次只能调用一个
+  控制工具且不能与其他任何工具混用
+- 轮次语义：调用成功后的返回（tasks/plan）应写入 StateGraph，作为下一次
+  调用的 current_* 参数，形成防重闭环
+- fanout 的 tasks 参数支持 JSON 字符串输入（兼容只能输出 str 的模型），
+  解析失败返回 error；解析结果仍走完整列表校验
+- 错误消息携带定位索引：task[i]（fanout）、plan[j]（plan 结构校验）
 """
 
 import json
