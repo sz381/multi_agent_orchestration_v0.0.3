@@ -77,21 +77,13 @@ import pytest
 
 from core.tools._kernel._bash import bash
 from core.tools._kernel.constants import BASH_MAX_OUTPUT_CHARS
-from tests.helpers import read_json, start_http_server
+from tests.helpers import _pid_exists, read_json, start_http_server
 from utils.settings import settings
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin",
     reason="bash 工具仅支持 macOS（sandbox-exec + Seatbelt 沙箱）",
 )
-
-
-def _pid_exists(pid: int) -> bool:
-    """检查 PID 对应的进程是否存在（ps 退出码 0 即存在）。"""
-    result = subprocess.run(
-        ["ps", "-p", str(pid)], capture_output=True, text=True, timeout=5
-    )
-    return result.returncode == 0
 
 
 class TestBashParameterValidation:

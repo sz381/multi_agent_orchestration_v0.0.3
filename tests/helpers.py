@@ -6,6 +6,10 @@
 - make_indexed_file: 生成每行内容带行号的文件，用于校验行号与内容对应
 - make_text_file: 生成指定内容的文本文件（父目录自动创建）
 - start_http_server: 在 127.0.0.1 随机端口启动 HTTP 探针服务器（bash 网络放行用例用）
+- start_port_listener: 在白名单端口段内启动真实 TCP 监听子进程（kill_specific_process 端到端用）
+- _wait_port_free: 轮询等待端口不再被监听（kill 端到端用例端口释放断言用）
+- _idle_port: 挑一个白名单段内的空闲端口（kill 无进程监听用例用）
+- _pid_exists: 检查 PID 对应的进程是否存在（超时整组终止验证用）
 - rels: 将绝对路径列表转为相对路径集合（基于 realpath 归一化后的工作区根）
 - _phase: 构造标准阶段字典（plan 三工具测试统一造数）
 - _ok_phases: 构造 count 个互不重复的合法阶段
@@ -20,7 +24,12 @@
 
 import json
 import os
+import random
+import socket
+import subprocess
+import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
@@ -116,6 +125,122 @@ def start_http_server():
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return port, server
+
+
+def start_port_listener(mode: str = "graceful"):
+    """在白名单端口段内启动真实 TCP 监听子进程（kill_specific_process 端到端用）。
+
+    mode="graceful"：收到 SIGTERM 立即 sys.exit(0)（验证优雅终止路径）；
+    mode="stubborn"：忽略 SIGTERM（验证 SIGKILL 升级路径）。
+
+    端口选择：KILL_ALLOWED_PORTS 首段内随机 bind 探测（bind 成功即空闲），
+    避免与开发环境端口冲突，也避免误杀他人进程。
+
+    Returns:
+        (proc, port)：Popen 实例与监听端口。用例结束必须兜底清理：
+        if proc.poll() is None: proc.kill()；随后 proc.wait() reap。
+    """
+    from core.tools._kernel.constants import KILL_ALLOWED_PORTS
+
+    script = (
+        "import signal, socket, sys, time\n"
+        "mode = sys.argv[1]\n"
+        "s = socket.socket()\n"
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        's.bind(("127.0.0.1", int(sys.argv[2])))\n'
+        "s.listen(1)\n"
+        'if mode == "graceful":\n'
+        "    def _exit(*_): sys.exit(0)\n"
+        "    signal.signal(signal.SIGTERM, _exit)\n"
+        "else:\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True:\n"
+        "    time.sleep(1)\n"
+    )
+    lo, hi = KILL_ALLOWED_PORTS[0]
+    port = None
+    for _ in range(30):
+        candidate = random.randint(lo, hi)
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", candidate))
+                port = candidate
+                break
+            except OSError:
+                continue
+    if port is None:
+        raise RuntimeError(f"no idle port in {lo}..{hi}")
+
+    proc = subprocess.Popen([sys.executable, "-c", script, mode, str(port)])
+    # 等待端口可连接（子进程就绪）；子进程提前退出则立即失败
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"listener exited early: rc={proc.returncode}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return proc, port
+        except OSError:
+            time.sleep(0.05)
+    proc.kill()
+    raise RuntimeError("listener did not become ready in 5s")
+
+
+def _wait_port_free(port: int, seconds: float = 3) -> bool:
+    """轮询等待端口不再被监听（TIME_WAIT 残留连接可能短暂干扰 lsof）。
+
+    调用 kill_specific_process 后，进程退出与端口释放之间存在内核
+    回收窗口（残留连接的 TIME_WAIT 会让 lsof 短暂仍报该端口），
+    单次断言会 flaky，必须轮询。
+
+    Returns:
+        端口在 seconds 秒内释放返回 True，超时返回 False。
+    """
+    from core.tools._kernel import _bash
+
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if not _bash._lsof_pids(port):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _idle_port() -> int:
+    """挑一个白名单段内的空闲端口（bind 成功即空闲）后立即释放。
+
+    用于 kill_specific_process 的"无进程监听"用例：选段内随机端口，
+    bind 成功即证明当前无监听者，立即 close 后调用工具验证 No process
+    listening（窗口极小，可接受）。
+
+    Returns:
+        空闲端口号；30 次尝试失败抛 RuntimeError。
+    """
+    from core.tools._kernel.constants import KILL_ALLOWED_PORTS
+
+    lo, hi = KILL_ALLOWED_PORTS[0]
+    for _ in range(30):
+        candidate = random.randint(lo, hi)
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", candidate))
+                return candidate
+            except OSError:
+                continue
+    raise RuntimeError(f"no idle port in {lo}..{hi}")
+
+
+def _pid_exists(pid: int) -> bool:
+    """检查 PID 对应的进程是否存在（ps 退出码 0 即存在）。
+
+    用于 bash 超时整组终止验证：killpg 后轮询组内子进程是否被连带
+    终止。与 _bash._pid_alive 的语义不同：此处不区分僵尸态，只要
+    ps 能查到即视为存在（验证目标是被终止而非仅变僵尸）。
+    """
+    result = subprocess.run(
+        ["ps", "-p", str(pid)], capture_output=True, text=True, timeout=5
+    )
+    return result.returncode == 0
 
 
 def make_indexed_file(workspace, name: str, line_count: int):
