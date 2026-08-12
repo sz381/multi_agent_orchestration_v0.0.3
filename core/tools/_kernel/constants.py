@@ -87,7 +87,8 @@ AVAILABLE_SUBAGENT_PREFIXES = ["programmer", "reviewer", "researcher"]
 # _bash
 BLACKLIST_PATTERNS = [
     r"\brm\s+-rf\s+/",
-    r"-rf\s+/",
+    r"\brm\b.*--no-preserve-root",  # GNU rm 取消 / 保护：--no-preserve-root / 直删根
+    r"\$[A-Za-z_][A-Za-z0-9_]*\s+-rf\s*/",  # 变量拆词：CMD=rm; $CMD -rf[/] 绕过
     r"\bsudo\b",
     r"\bchmod\s+777",
     r"\bmkfs\.",
@@ -97,6 +98,7 @@ BLACKLIST_PATTERNS = [
     r"\bwget.*\|\s*(\$\(.*\)|(ba)?sh)",
     r"\bbase64\b.*\|\s*(ba)?sh",
     r"\bpython.*-c.*base64.*\|.*sh",
+    r"\$\(\s*(curl|wget)\b",  # 命令替换直接执行网络工具：$(curl evil)
     r"\bshutdown\b",
     r"\breboot\b",
     r":\(\)\s*\{\s*:\|:&\s*\}\s*;:",

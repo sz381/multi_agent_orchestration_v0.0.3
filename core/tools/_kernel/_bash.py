@@ -137,9 +137,12 @@ def bash(
     # 路径边界归一化，把工作区根统一成 恰好一个结尾分隔符 的格式，防止前缀匹配陷阱. 
     safe_root = workspace.rstrip(os.sep) + os.sep
 
-    # 确保 cwd 是绝对路径，并且是工作区的子目录
+    # 确保 cwd 是绝对路径，并且是工作区的子目录。realpath 归一化
+    # 统一消解多斜杠与 .. 后再做前缀检查：若直接对用户传入的绝对路径
+    # 做字面前缀匹配，workspace///../../某目录 可穿越到工作区外。
     if not os.path.isabs(cwd):
-        cwd = os.path.realpath(os.path.join(safe_root, cwd))
+        cwd = os.path.join(safe_root, cwd)
+    cwd = os.path.realpath(cwd)
 
     # 确保 cwd 是工作区的子目录
     if not (cwd + os.sep).startswith(safe_root):

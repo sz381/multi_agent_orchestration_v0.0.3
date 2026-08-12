@@ -5,6 +5,7 @@
 - make_file: 生成指定行数与行长的文本文件，返回文件路径
 - make_indexed_file: 生成每行内容带行号的文件，用于校验行号与内容对应
 - make_text_file: 生成指定内容的文本文件（父目录自动创建）
+- start_http_server: 在 127.0.0.1 随机端口启动 HTTP 探针服务器（bash 网络放行用例用）
 - rels: 将绝对路径列表转为相对路径集合（基于 realpath 归一化后的工作区根）
 - _phase: 构造标准阶段字典（plan 三工具测试统一造数）
 - _ok_phases: 构造 count 个互不重复的合法阶段
@@ -19,6 +20,8 @@
 
 import json
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 def read_json(raw: str) -> dict:
@@ -83,6 +86,36 @@ def make_text_file(workspace, name: str, content: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def start_http_server():
+    """在 127.0.0.1 随机端口启动 HTTP 探针服务器。
+
+    任何 GET 请求都返回固定内容 sandbox-http-ok，供 bash 网络放行用例
+    （allow_network=True）验证沙箱网络模式真的放行；用 127.0.0.1 避免
+    依赖外部网络，用随机端口避免端口冲突。
+
+    Returns:
+        (port, server)：port 为监听端口；server 为 HTTPServer 实例，
+        用例结束后调用 server.shutdown() 关闭。
+    """
+    class _ProbeHandler(BaseHTTPRequestHandler):
+        """探针处理器：任何 GET 请求都返回固定内容。"""
+
+        def do_GET(self):
+            body = b"sandbox-http-ok"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass  # 关闭默认访问日志，避免测试输出噪音
+
+    server = HTTPServer(("127.0.0.1", 0), _ProbeHandler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return port, server
 
 
 def make_indexed_file(workspace, name: str, line_count: int):

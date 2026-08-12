@@ -89,11 +89,12 @@ def _exec(profile_path: str, cmd: str, cwd: str, timeout: int) -> dict:
     # 否则子进程继承 VIRTUAL_ENV 后会误用代理的 Python 环境，破坏所有依赖
     env = {k: v for k, v in os.environ.items() if k not in SANDBOX_ENV_STRIP and not _is_sensitive_env(k)}
     
-    # 从 PATH 剔除代理的 .venv/bin；TMPDIR/HOME 默认指向 /tmp，
-    # 防止子进程读取 ~/.gitconfig 等宿主配置
+    # 从 PATH 剔除代理的 .venv/bin；TMPDIR/HOME 强制指向 /tmp，
+    # 防止子进程按 $HOME 定位 ~/.gitconfig 等宿主配置（环境层防线：
+    # 沙箱读白名单拦不住按 $HOME 拼接的配置读取，必须重定向变量本身）
     env["PATH"] = _sandbox_path()
-    env.setdefault("TMPDIR", "/tmp")
-    env.setdefault("HOME", "/tmp")
+    env["TMPDIR"] = "/tmp"
+    env["HOME"] = "/tmp"
 
     # macOS 的 /usr/bin/java 是 stub——Gradle/Maven 需要显式 JAVA_HOME
     if "JAVA_HOME" not in env:
