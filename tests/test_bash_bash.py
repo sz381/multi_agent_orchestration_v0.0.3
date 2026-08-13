@@ -57,6 +57,7 @@
 - 超时整组终止：killpg SIGKILL 波及组内后台子进程（非仅 bash 自身）
 
 使用注意：
+- 全部 async：配合 kernel 层工具异步化（bash 调用点均 await，并发用例用 asyncio.gather）
 - 仅 macOS：pytestmark 跳过非 darwin 平台（sandbox-exec 不可用）
 - workspace fixture 来自 tests/conftest.py（monkeypatch 重定向 settings.workspace_dir 到 tmp_path）
 - start_http_server 来自 tests/helpers.py（网络放行用例的本地探针）
@@ -66,12 +67,11 @@
 - 探针临时文件（home 写探针、/tmp pidfile）在 finally 中清理，沙箱失效时不会残留
 """
 
+import asyncio
 import os
-import signal
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -89,95 +89,109 @@ pytestmark = pytest.mark.skipif(
 class TestBashParameterValidation:
     """参数校验：类型安全与边界（不经过沙箱执行）。"""
 
-    def test_bash_rejects_non_string_cmd(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_non_string_cmd(self, workspace):
         """非字符串 cmd（int）应返回 error，提示 cmd 必须是字符串。"""
-        result = read_json(bash(cmd=123))
+        result = read_json(await bash(cmd=123))
         assert result["status"] == "error"
         assert result["tool_name"] == "bash"
         assert "cmd must be a string" in result["message"]
 
-    def test_bash_rejects_empty_cmd(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_empty_cmd(self, workspace):
         """纯空白 cmd 应返回 error，提示 cmd 非空；防止误执行空命令。"""
-        result = read_json(bash(cmd="   "))
+        result = read_json(await bash(cmd="   "))
         assert result["status"] == "error"
         assert "non-empty" in result["message"]
 
-    def test_bash_rejects_non_bool_allow_network(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_non_bool_allow_network(self, workspace):
         """字符串 "false" 的 allow_network 应拒绝：Python 中非空字符串是 truthy，
         若放行会把禁网请求误判为网络模式，是参数校验的关键陷阱。"""
-        result = read_json(bash(cmd="echo hi", allow_network="false"))
+        result = read_json(await bash(cmd="echo hi", allow_network="false"))
         assert result["status"] == "error"
         assert "boolean" in result["message"]
 
-    def test_bash_rejects_non_number_timeout(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_non_number_timeout(self, workspace):
         """字符串 timeout 应拒绝，提示必须是数字。"""
-        result = read_json(bash(cmd="echo hi", timeout="30"))
+        result = read_json(await bash(cmd="echo hi", timeout="30"))
         assert result["status"] == "error"
         assert "number" in result["message"]
 
-    def test_bash_rejects_bool_timeout(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_bool_timeout(self, workspace):
         """bool timeout 应拒绝：bool 是 int 子类，isinstance(True, int) 为真，
         不显式排除会把 True 当作 1 秒放行。"""
-        result = read_json(bash(cmd="echo hi", timeout=True))
+        result = read_json(await bash(cmd="echo hi", timeout=True))
         assert result["status"] == "error"
         assert "number" in result["message"]
 
-    def test_bash_rejects_non_positive_timeout(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_non_positive_timeout(self, workspace):
         """timeout=0 应拒绝：零超时会让命令立即被终止，属于无效配置。"""
-        result = read_json(bash(cmd="echo hi", timeout=0))
+        result = read_json(await bash(cmd="echo hi", timeout=0))
         assert result["status"] == "error"
         assert "> 0" in result["message"]
 
-    def test_bash_rejects_none_cmd(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_none_cmd(self, workspace):
         """cmd=None 应拒绝：None 不是字符串，落入类型校验分支而非执行分支。"""
-        result = read_json(bash(cmd=None))
+        result = read_json(await bash(cmd=None))
         assert result["status"] == "error"
         assert "cmd must be a string" in result["message"]
 
-    def test_bash_rejects_empty_cmd_exactly(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_empty_cmd_exactly(self, workspace):
         """cmd="" 应拒绝（与纯空白串同一校验路径）：空命令无执行意义，
         显式拒绝比静默放行更清晰。"""
-        result = read_json(bash(cmd=""))
+        result = read_json(await bash(cmd=""))
         assert result["status"] == "error"
         assert "non-empty" in result["message"]
 
-    def test_bash_rejects_negative_timeout(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_negative_timeout(self, workspace):
         """timeout=-1 应拒绝：负数超时无意义，<= 0 校验必须覆盖负数而不只是 0。"""
-        result = read_json(bash(cmd="echo hi", timeout=-1))
+        result = read_json(await bash(cmd="echo hi", timeout=-1))
         assert result["status"] == "error"
         assert "> 0" in result["message"]
 
-    def test_bash_rejects_non_string_cwd(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_non_string_cwd(self, workspace):
         """非字符串 cwd（int）应拒绝，提示 cwd 必须是字符串。"""
-        result = read_json(bash(cmd="echo hi", cwd=123))
+        result = read_json(await bash(cmd="echo hi", cwd=123))
         assert result["status"] == "error"
         assert "cwd must be a string" in result["message"]
 
-    def test_bash_rejects_cwd_outside_workspace(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_cwd_outside_workspace(self, workspace):
         """相对路径 ../../ 与绝对路径 /tmp 越出工作区都应拒绝：
         前者防路径穿越，后者防把工作区外目录当作执行根。"""
-        result = read_json(bash(cmd="echo hi", cwd="../../.."))
+        result = read_json(await bash(cmd="echo hi", cwd="../../.."))
         assert result["status"] == "error"
         assert "outside the workspace" in result["message"]
 
-        result_abs = read_json(bash(cmd="echo hi", cwd="/tmp"))
+        result_abs = read_json(await bash(cmd="echo hi", cwd="/tmp"))
         assert result_abs["status"] == "error"
         assert "outside the workspace" in result_abs["message"]
 
-    def test_bash_cwd_none_rejected(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_cwd_none_rejected(self, workspace):
         """cwd=None 应拒绝：None 落入非字符串分支，不会意外回退到默认目录
         （若实现回退默认值则属于静默放宽，此处锁定拒绝行为）。"""
-        result = read_json(bash(cmd="pwd", cwd=None))
+        result = read_json(await bash(cmd="pwd", cwd=None))
         assert result["status"] == "error"
         assert "cwd must be a string" in result["message"]
 
-    def test_bash_cwd_empty_equals_dot(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_cwd_empty_equals_dot(self, workspace):
         """cwd="" 应等价于 "."：join 后归一化到工作区根，正常执行且不越界。"""
-        result = read_json(bash(cmd="pwd", cwd=""))
+        result = read_json(await bash(cmd="pwd", cwd=""))
         assert result["exit_code"] == 0
         assert result["stdout"].strip() == os.path.realpath(str(workspace))
 
-    def test_bash_cwd_trailing_slash_traversal(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_cwd_trailing_slash_traversal(self, workspace):
         """cwd=工作区///../../etc 多斜杠 + 穿越应被拒：若仅用字面前缀匹配
         会被多斜杠绕过（回归：绝对路径分支曾跳过 realpath 归一化，
         chdir 依赖内核解析导致穿越目标存在时可在工作区外执行）。
@@ -186,7 +200,7 @@ class TestBashParameterValidation:
         traversal = f"{ws}///../../etc"  # 穿越后目标不存在
         existing = f"{ws}/../.."  # 穿越后目标是真实存在的上级目录
         for cwd in (traversal, existing):
-            result = read_json(bash(cmd="pwd", cwd=cwd))
+            result = read_json(await bash(cmd="pwd", cwd=cwd))
             assert result["status"] == "error"
             assert "outside the workspace" in result["message"]
 
@@ -210,7 +224,8 @@ class TestBashParameterValidation:
         "shutdown -h now",
         "reboot",
     ])
-    def test_bash_rejects_blacklisted_command(self, workspace, cmd):
+    @pytest.mark.asyncio
+    async def test_bash_rejects_blacklisted_command(self, workspace, cmd):
         """黑名单命令应在执行前被安全策略拦截，返回 error 而非进入沙箱执行
         （Seatbelt 沙箱为第一道防线，黑名单为纵深防御）。
 
@@ -218,7 +233,7 @@ class TestBashParameterValidation:
         编码混淆、命令替换、提权/破坏命令、fork bomb、变量拆词绕过——
         其中 --no-preserve-root/$(curl)/$CMD 拆词是实测发现的绕过回归。
         """
-        result = read_json(bash(cmd=cmd))
+        result = read_json(await bash(cmd=cmd))
         assert result["status"] == "error"
         assert "blocked by security policy" in result["message"]
 
@@ -233,32 +248,35 @@ class TestBashParameterValidation:
         "echo $(date)",
         "find . -name '*.pyc' | xargs rm -rf",
     ])
-    def test_bash_allows_legitimate_commands(self, workspace, cmd):
+    @pytest.mark.asyncio
+    async def test_bash_allows_legitimate_commands(self, workspace, cmd):
         """正常开发命令不应被黑名单误伤（回归保护）。
 
         覆盖 -rf 精确化相关的合法用法（tar -rf 归档、grep -rf 递归+
         pattern 文件、xargs rm -rf 清理）与命令替换正常用法 $(date)，
         防止为堵绕过把黑名单改宽而误伤日常开发。
         """
-        result = read_json(bash(cmd=cmd))
+        result = read_json(await bash(cmd=cmd))
         assert result["status"] == "ok"
         assert "blocked" not in result.get("message", "")
 
-    def test_bash_raises_when_workspace_not_configured(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_bash_raises_when_workspace_not_configured(self, monkeypatch):
         """工作区未配置时应抛 RuntimeError（配置错误属于程序缺陷，
         不返回 error JSON 掩盖问题）。"""
         monkeypatch.setattr(settings, "workspace_dir", None)
         with pytest.raises(RuntimeError, match="WORKSPACE_DIR"):
-            bash(cmd="echo hi")
+            await bash(cmd="echo hi")
 
 
 class TestBashExecution:
     """正常执行：响应契约与输出处理。"""
 
-    def test_bash_executes_simple_command(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_executes_simple_command(self, workspace):
         """常规命令 echo 应成功执行，返回完整的响应契约字段
         （status/exit_code/stdout/stderr/timeout/elapsed/sandbox_violations）。"""
-        result = read_json(bash(cmd="echo hello"))
+        result = read_json(await bash(cmd="echo hello"))
         assert result["status"] == "ok"
         assert result["tool_name"] == "bash"
         assert result["exit_code"] == 0
@@ -268,60 +286,67 @@ class TestBashExecution:
         assert result["elapsed"] >= 0
         assert result["sandbox_violations"] == 0
 
-    def test_bash_runs_in_workspace_subdir(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_runs_in_workspace_subdir(self, workspace):
         """相对 cwd（"sub"）应解析为工作区子目录并在此执行：
         pwd 输出应与真实路径一致（realpath 归一化防符号链接差异）。"""
         (workspace / "sub").mkdir()
-        result = read_json(bash(cmd="pwd", cwd="sub"))
+        result = read_json(await bash(cmd="pwd", cwd="sub"))
         assert result["exit_code"] == 0
         assert result["stdout"].strip() == os.path.realpath(str(workspace / "sub"))
 
-    def test_bash_handles_utf8_output(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_handles_utf8_output(self, workspace):
         """中文输出应原样返回（ensure_ascii=False），不被转义成 uXXXX 形式。"""
-        result = read_json(bash(cmd="echo 你好世界"))
+        result = read_json(await bash(cmd="echo 你好世界"))
         assert result["exit_code"] == 0
         assert result["stdout"].strip() == "你好世界"
 
-    def test_bash_handles_stderr_and_missing_command(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_handles_stderr_and_missing_command(self, workspace):
         """不存在的命令应返回 127 且错误信息进 stderr（不混入 stdout）；
         ls 不存在文件应返回 1（macOS BSD ls：1=轻微错误，与 GNU ls 的 2 不同），
         验证 stdout/stderr 通道分离。"""
-        result = read_json(bash(cmd="nonexistent_cmd_xyz_abc"))
+        result = read_json(await bash(cmd="nonexistent_cmd_xyz_abc"))
         assert result["exit_code"] == 127
         assert "command not found" in result["stderr"]
 
-        result_ls = read_json(bash(cmd="ls /nonexistent_path_xyz_abc"))
+        result_ls = read_json(await bash(cmd="ls /nonexistent_path_xyz_abc"))
         assert result_ls["exit_code"] == 1
         assert "No such file" in result_ls["stderr"]
 
-    def test_bash_truncates_long_output(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_truncates_long_output(self, workspace):
         """2000 字符的 stdout 应截断为 BASH_MAX_OUTPUT_CHARS 加省略号：
         防止超长输出撑爆模型上下文。"""
-        result = read_json(bash(cmd="printf 'x%.0s' {1..2000}"))
+        result = read_json(await bash(cmd="printf 'x%.0s' {1..2000}"))
         assert result["exit_code"] == 0
         assert len(result["stdout"]) == BASH_MAX_OUTPUT_CHARS + 3
         assert result["stdout"].endswith("...")
 
-    def test_bash_truncates_long_stderr(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_truncates_long_stderr(self, workspace):
         """2000 字符的 stderr 应同样截断：单路上限对 stdout/stderr 平等生效。"""
-        result = read_json(bash(cmd="printf 'e%.0s' {1..2000} >&2"))
+        result = read_json(await bash(cmd="printf 'e%.0s' {1..2000} >&2"))
         assert result["exit_code"] == 0
         assert len(result["stderr"]) == BASH_MAX_OUTPUT_CHARS + 3
         assert result["stderr"].endswith("...")
 
-    def test_bash_truncates_output_at_exact_limit(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_truncates_output_at_exact_limit(self, workspace):
         """输出恰好等于上限（806 字符）时不应截断：截断条件必须是严格大于，
         恰好达到上限属于合法完整输出，边界语义要精确。"""
-        result = read_json(bash(cmd="printf 'x%.0s' {1..806}"))
+        result = read_json(await bash(cmd="printf 'x%.0s' {1..806}"))
         assert result["exit_code"] == 0
         assert len(result["stdout"]) == BASH_MAX_OUTPUT_CHARS
         assert not result["stdout"].endswith("...")
 
-    def test_bash_json_schema_complete(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_json_schema_complete(self, workspace):
         """响应 JSON 字段完整：status/tool_name/command/exit_code/stdout/stderr/
         timeout/sandbox_violations/elapsed 全部存在且类型正确（模型侧依赖
         该固定契约解析，字段缺失会导致下游崩溃）。"""
-        result = read_json(bash(cmd="echo hi"))
+        result = read_json(await bash(cmd="echo hi"))
         assert set(result.keys()) == {
             "status", "tool_name", "command", "exit_code",
             "stdout", "stderr", "timeout", "sandbox_violations", "elapsed",
@@ -333,49 +358,53 @@ class TestBashExecution:
         assert isinstance(result["timeout"], bool)
         assert isinstance(result["elapsed"], (int, float))
 
-    def test_bash_json_special_chars(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_json_special_chars(self, workspace):
         """输出含双引号/反斜杠/换行时应被 json.dumps 正确转义，
         经 read_json 解析回 Python 对象后内容无损。"""
-        result = read_json(bash(cmd='printf \'"quoted"\\\\backslash\\nline2\''))
+        result = read_json(await bash(cmd='printf \'"quoted"\\\\backslash\\nline2\''))
         assert result["exit_code"] == 0
         assert result["stdout"] == '"quoted"\\backslash\nline2'
 
-    def test_bash_returns_error_when_executor_fails(self, workspace, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_bash_returns_error_when_executor_fails(self, workspace, monkeypatch):
         """executor 抛异常时应兜底返回 status=error 而不上抛：工具边界必须
         捕获异常，模型拿到的是可读 JSON 而非崩溃（mock executor 验证
         真沙箱无法触发的异常路径）。"""
         import core.tools._kernel._bash as bash_mod
 
-        def boom(*args, **kwargs):
+        async def boom(*args, **kwargs):
             raise RuntimeError("sandbox exploded")
 
         monkeypatch.setattr(bash_mod, "sandbox_run", boom)
-        result = read_json(bash(cmd="echo hi"))
+        result = read_json(await bash(cmd="echo hi"))
         assert result["status"] == "error"
         assert "Bash execution failed" in result["message"]
         assert "sandbox exploded" in result["message"]
 
-    def test_bash_concurrent_executions(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_concurrent_executions(self, workspace):
         """3 个 bash 并发执行应全部成功：每次调用独立 sandbox-exec 子进程，
-        并发互不干扰、无共享可变状态（ThreadPoolExecutor 真实并行）。"""
-        def run(i):
-            return read_json(bash(cmd=f"echo job-{i}"))
+        并发互不干扰、无共享可变状态（asyncio.gather 真实并发）。"""
+        async def run(i):
+            return read_json(await bash(cmd=f"echo job-{i}"))
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            results = list(pool.map(run, range(3)))
+        results = await asyncio.gather(*(run(i) for i in range(3)))
         assert all(r["status"] == "ok" and r["exit_code"] == 0 for r in results)
         assert {r["stdout"].strip() for r in results} == {"job-0", "job-1", "job-2"}
 
-    def test_bash_uses_pipefail(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_uses_pipefail(self, workspace):
         """管道 `false | echo` 的退出码应为 1（pipefail 取最右非零段），
         而非 echo 的 0——防止管道末尾命令用 0 掩盖真实失败。"""
-        result = read_json(bash(cmd="false | echo piped-ok"))
+        result = read_json(await bash(cmd="false | echo piped-ok"))
         assert result["exit_code"] == 1
         assert "piped-ok" in result["stdout"]
 
-    def test_bash_supports_pipeline(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_supports_pipeline(self, workspace):
         """常规管道应正常执行：echo 输出经 tr 转换后大小写变化。"""
-        result = read_json(bash(cmd="echo hello | tr a-z A-Z"))
+        result = read_json(await bash(cmd="echo hello | tr a-z A-Z"))
         assert result["exit_code"] == 0
         assert result["stdout"].strip() == "HELLO"
 
@@ -383,34 +412,38 @@ class TestBashExecution:
 class TestBashEnvironmentIsolation:
     """子进程环境隔离：代理环境变量与敏感凭据不泄漏。"""
 
-    def test_bash_strips_agent_env_vars(self, workspace, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_bash_strips_agent_env_vars(self, workspace, monkeypatch):
         """VIRTUAL_ENV/VIRTUAL_ENV_PROMPT 等代理相关变量应被剔除：
         否则子进程继承后误用代理的 Python 环境，破坏依赖解析。"""
         monkeypatch.setenv("VIRTUAL_ENV", "/fake/venv")
         monkeypatch.setenv("VIRTUAL_ENV_PROMPT", "fake-prompt")
-        result = read_json(bash(cmd="echo ${VIRTUAL_ENV:-unset} ${VIRTUAL_ENV_PROMPT:-unset}"))
+        result = read_json(await bash(cmd="echo ${VIRTUAL_ENV:-unset} ${VIRTUAL_ENV_PROMPT:-unset}"))
         assert result["exit_code"] == 0
         assert result["stdout"].strip() == "unset unset"
 
-    def test_bash_strips_sensitive_env_vars(self, workspace, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_bash_strips_sensitive_env_vars(self, workspace, monkeypatch):
         """环境变量名含敏感关键字（API_KEY 等）的变量不应传入子进程：
         防止凭据泄漏到沙箱内的任意命令。"""
         monkeypatch.setenv("MY_TEST_API_KEY", "secret-value")
-        result = read_json(bash(cmd="env | grep -ci my_test_api_key || true"))
+        result = read_json(await bash(cmd="env | grep -ci my_test_api_key || true"))
         assert result["exit_code"] == 0
         assert result["stdout"].strip() == "0"
 
-    def test_bash_strips_agent_venv_from_path(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_strips_agent_venv_from_path(self, workspace):
         """PATH 中代理自身的 .venv 前缀条目应被剔除：
         防止子进程解析到代理的 Python 解释器。"""
-        result = read_json(bash(cmd="echo $PATH"))
+        result = read_json(await bash(cmd="echo $PATH"))
         assert result["exit_code"] == 0
         assert "multi_agent_orchestration" not in result["stdout"]
 
-    def test_bash_redirects_home_to_tmp(self, workspace):
+    @pytest.mark.asyncio
+    async def test_bash_redirects_home_to_tmp(self, workspace):
         """子进程 HOME/TMPDIR 应指向 /tmp：防止子进程读取 ~/.gitconfig 等
         宿主配置，将可能泄漏用户信息的路径移出沙箱可见范围。"""
-        result = read_json(bash(cmd="echo $HOME $TMPDIR"))
+        result = read_json(await bash(cmd="echo $HOME $TMPDIR"))
         assert result["exit_code"] == 0
         assert result["stdout"].strip() == "/tmp /tmp"
 
@@ -423,7 +456,8 @@ class TestSeatbeltSandboxActive:
     行计数为违规并从 stderr 移除——只有 Seatbelt 真正拦截才会出现这些行。
     """
 
-    def test_sandbox_blocks_write_outside_workspace(self, workspace):
+    @pytest.mark.asyncio
+    async def test_sandbox_blocks_write_outside_workspace(self, workspace):
         """向 home 根（不在写白名单）写文件应被拒绝：
         profile 的 file-write* 仅限工作区 + /tmp，此用例验证写边界生效。
         若沙箱失效，探针文件会被真实创建（断言失败 + finally 清理）。"""
@@ -432,7 +466,7 @@ class TestSeatbeltSandboxActive:
             pytest.skip("宿主 home 目录不可写，无法构造写探针")
         probe = os.path.join(home, "__sb_write_probe__")
         try:
-            result = read_json(bash(cmd=f"echo probe > {probe}"))
+            result = read_json(await bash(cmd=f"echo probe > {probe}"))
             assert result["exit_code"] != 0
             assert result["sandbox_violations"] >= 1
             assert not os.path.exists(probe)
@@ -440,64 +474,69 @@ class TestSeatbeltSandboxActive:
             if os.path.exists(probe):
                 os.unlink(probe)
 
-    def test_sandbox_allows_write_in_workspace_and_tmp(self, workspace):
+    @pytest.mark.asyncio
+    async def test_sandbox_allows_write_in_workspace_and_tmp(self, workspace):
         """工作区与 /tmp 应可写（白名单正向验证）：与写拦截用例互补，
         证明 file-write* 不是全禁而是精确放行——否则沙箱连正常写文件
         都做不到，开发工作流会被打断。"""
         ws_file = workspace / "sb_write_ok.txt"
-        result = read_json(bash(cmd=f"echo ok > {ws_file}"))
+        result = read_json(await bash(cmd=f"echo ok > {ws_file}"))
         assert result["exit_code"] == 0
         assert result["sandbox_violations"] == 0
         assert ws_file.read_text(encoding="utf-8").strip() == "ok"
 
         tmp_file = "/tmp/__sb_tmp_ok__"
         try:
-            result_tmp = read_json(bash(cmd=f"echo ok > {tmp_file}"))
+            result_tmp = read_json(await bash(cmd=f"echo ok > {tmp_file}"))
             assert result_tmp["exit_code"] == 0
             assert os.path.exists(tmp_file)
         finally:
             if os.path.exists(tmp_file):
                 os.unlink(tmp_file)
 
-    def test_sandbox_blocks_signal_to_foreign_process(self, workspace):
+    @pytest.mark.asyncio
+    async def test_sandbox_blocks_signal_to_foreign_process(self, workspace):
         """沙箱内 kill 宿主进程应被拒绝（(allow signal (target self)) 生效），
         且宿主进程必须仍然存活——这同时证明了 bash 工具杀不了外部进程，
         即 kill_specific_process 作为安全出口的存在必要性。"""
         proc = subprocess.Popen(["sleep", "300"])
         try:
-            result = read_json(bash(cmd=f"kill -TERM {proc.pid}"))
+            result = read_json(await bash(cmd=f"kill -TERM {proc.pid}"))
             assert result["exit_code"] != 0
             assert result["sandbox_violations"] >= 1
-            time.sleep(0.3)  # 给潜在的误杀留出传播时间
+            await asyncio.sleep(0.3)  # 给潜在的误杀留出传播时间
             assert proc.poll() is None, "沙箱未生效：外部进程被 bash 杀掉了"
         finally:
             proc.terminate()
             proc.wait(timeout=5)
 
-    def test_sandbox_blocks_network_when_air_gapped(self, workspace):
+    @pytest.mark.asyncio
+    async def test_sandbox_blocks_network_when_air_gapped(self, workspace):
         """air-gapped 模式（allow_network=False）下网络连接应被 (deny network*)
         拦截：用 bash 内置的 /dev/tcp 探测 127.0.0.1:9（discard 端口）避免依赖
         外部网络——沙箱拦截报 Operation not permitted（被计数为 violations），
         无沙箱报 Connection refused（不计数），文案可区分。"""
-        result = read_json(bash(
+        result = read_json(await bash(
             cmd="echo hi > /dev/tcp/127.0.0.1/9",
             allow_network=False,
         ))
         assert result["exit_code"] != 0
         assert result["sandbox_violations"] >= 1
 
-    def test_sandbox_allows_network_when_enabled(self, workspace):
+    @pytest.mark.asyncio
+    async def test_sandbox_allows_network_when_enabled(self, workspace):
         """网络模式（allow_network=True）应真的放行网络：
         用本地 HTTP 探针服务器验证 (allow network*) 生效，不依赖外部网络。"""
         port, server = start_http_server()
         try:
-            result = read_json(bash(cmd=f"curl -s --max-time 5 http://127.0.0.1:{port}"))
+            result = read_json(await bash(cmd=f"curl -s --max-time 5 http://127.0.0.1:{port}"))
             assert result["exit_code"] == 0
             assert result["stdout"].strip() == "sandbox-http-ok"
         finally:
             server.shutdown()
 
-    def test_sandbox_profile_contains_core_deny_rules(self, workspace):
+    @pytest.mark.asyncio
+    async def test_sandbox_profile_contains_core_deny_rules(self, workspace):
         """白盒验证 profile 规则文本：核心 deny 规则齐备
         （默认拒绝/信号仅限自身/敏感路径/网络开关），防止策略被误改后
         行为测试仍通过（配置层与行为层互为印证）。"""
@@ -515,7 +554,8 @@ class TestSeatbeltSandboxActive:
         assert "(allow network*)" in default
         assert "(deny network*)" in air
 
-    def test_sandbox_counts_multiple_violations(self, workspace):
+    @pytest.mark.asyncio
+    async def test_sandbox_counts_multiple_violations(self, workspace):
         """一次命令中 3 个越界写应计数 sandbox_violations >= 3：每条违规
         stderr 行独立计数，验证计数精度而非只验存在性（若计数逻辑丢行
         或去重会在此暴露）。"""
@@ -525,7 +565,7 @@ class TestSeatbeltSandboxActive:
         probes = [os.path.join(home, f"__sb_write_probe_{i}__") for i in range(3)]
         try:
             cmd = "; ".join(f"echo x > {p}" for p in probes)
-            result = read_json(bash(cmd=cmd))
+            result = read_json(await bash(cmd=cmd))
             assert result["exit_code"] != 0
             assert result["sandbox_violations"] >= 3
             assert not any(os.path.exists(p) for p in probes)
@@ -534,7 +574,8 @@ class TestSeatbeltSandboxActive:
                 if os.path.exists(p):
                     os.unlink(p)
 
-    def test_sandbox_kills_process_group_on_timeout(self, workspace):
+    @pytest.mark.asyncio
+    async def test_sandbox_kills_process_group_on_timeout(self, workspace):
         """超时后应整组 SIGKILL：不仅 bash 自身，组内后台子进程（sleep）
         也要被连带终止（start_new_session + killpg 契约）。
         用 /tmp pidfile 传递子进程 PID（超时路径 stdout 被清空，拿不到输出）。"""
@@ -542,7 +583,7 @@ class TestSeatbeltSandboxActive:
         if os.path.exists(pidfile):
             os.unlink(pidfile)
         try:
-            result = read_json(bash(
+            result = read_json(await bash(
                 cmd=f"sleep 30 & echo $! > {pidfile}; wait",
                 timeout=1,
             ))
@@ -555,7 +596,7 @@ class TestSeatbeltSandboxActive:
             # 轮询确认子进程被连带终止（给 killpg 与进程回收留时间）
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and _pid_exists(child_pid):
-                time.sleep(0.2)
+                await asyncio.sleep(0.2)
             assert not _pid_exists(child_pid), "超时后组内子进程仍存活"
         finally:
             if os.path.exists(pidfile):

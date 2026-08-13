@@ -64,8 +64,24 @@
   - 对应测试同步 → async 迁移：✅ 已完成（test_fs_readonly_view_file 38 + glob_tool 39 + grep_tool 69 = 146 用例，全部 `@pytest.mark.asyncio` + `await`，跨行调用点逐一补 await）。
   - grep 的 30s 总预算（`GREP_TOTAL_TIMEOUT_SECONDS`）保留内部墙钟轮询，整体包 to_thread，不做双重超时。
 - **第三批 `bash` / `kill_specific_process`**（风险最高）：
-  - `subprocess.run` → `asyncio.create_subprocess_exec`；超时 `asyncio.wait_for(proc.communicate(), timeout)`；超时后 `os.killpg`（需 `start_new_session=True`）；输出截断、沙箱违规计数逻辑照旧。
-  - 116 用例兜底；重写时注意 sandbox-exec 组合命令、killpg 整组终止。
+  - `bash` 工具：✅ 已完成（真异步，非 to_thread）
+    - `sandbox/executor.py`：新增 `_exec_async`（`asyncio.create_subprocess_exec` + `start_new_session` + `asyncio.wait_for(proc.communicate(), timeout)`，超时 `killpg(SIGKILL)` 整组终止）+ `arun`（async 版 run，profile 临时文件/截断逻辑照旧）；**同步 `_exec`/`run` 已删除**（import 改 arun 后成死代码链，-123 行）。JAVA_HOME 首次探测（同步 subprocess.run）包 `asyncio.to_thread`。
+    - `_bash.py`：`async def bash`，校验/黑名单/路径安全链留事件循环，`import arun as sandbox_run`（模块内名字不变，测试 monkeypatch 兼容）；执行模型写入 docstring。
+    - 验证：11 场景手动验证全过（基本执行/退出码/超时 1s 及时返回/**事件循环不阻塞**（2s bash 与 0.5s 任务并发，快任务 0.5s 完成）/killpg 整组终止/黑名单/参数校验/cwd 越界/沙箱违规检测）。
+    - 测试同步 → async 迁移：✅ 已完成（test_bash_bash.py 65 用例全绿，2.5s 跑完）
+      - 42 个测试全部 `@pytest.mark.asyncio` + `async def`；`read_json(bash(` → `read_json(await bash(`（40 单行 + 2 跨行调用点）；boom 改 `async def`（bash 内部 `await sandbox_run`）；pytest.raises 内裸调用加 await。
+      - 并发用例 ThreadPoolExecutor → `asyncio.gather`（真实并发语义不变）；轮询 `time.sleep` → `await asyncio.sleep`；顺手删死 import `signal`（未使用）。
+      - 教训：单次 SearchReplace 内多 replace_all 时，后一个 replace_all 可能只替换跨行匹配（工具行为异常），需单独再跑一次 replace_all 修复。
+  - `kill_specific_process`：✅ 已完成（真异步）
+    - 新增共享探测 `_run_probe`（`create_subprocess_exec` + `wait_for(5s)` + 超时 kill 收尸）；`_lsof_pids`/`_process_comm`/`_pid_alive` 改 async，`_wait_exit` 轮询改 `asyncio.sleep`；主函数校验留循环，`os.kill` 保持同步。`subprocess` import 已删（无残留）。
+    - 验证：7 场景手动验证全过（真实 HTTP server SIGTERM 杀/进程退出确认/无进程 error/白名单拦截/参数校验/**SIGKILL 升级**（忽略 SIGTERM 的顽固进程）/轮询期间事件循环不阻塞）。
+    - 测试同步 → async 迁移：✅ 已完成（test_bash_kill_specific_process.py 51 用例全绿，1.3s 跑完）
+      - 26 个测试全部 `@pytest.mark.asyncio` + `async def`；调用点 `read_json(kill_specific_process(` → `read_json(await kill_specific_process(`（24 处）。
+      - **async mock 适配**：`_lsof_pids`/`_process_comm`/`_wait_exit` 已 async，同步 lambda mock 会 TypeError（await 非协程）→ 无状态 mock 改用 `AsyncMock(return_value=...)`/`side_effect`，有状态 fake（计数/分支）手写 `async def`；`os.kill` mock 保持同步（工具内就是同步调用）。
+      - TestPidAliveUnit 三用例：mock 对象从 `subprocess.run`（已删）改为 `_run_probe`（AsyncMock 返回 (returncode, stdout) tuple）。
+      - 并发用例 `pool.map` → `asyncio.gather`；`ThreadPoolExecutor`/`subprocess` import 已删。
+      - **helpers.py 联动**：`_wait_port_free` 同步调用 `_bash._lsof_pids` 未 await → 协程永不等待（RuntimeWarning）+ 端口永远判忙 → 改 `async def` + `await` + `asyncio.sleep` 轮询。教训：**依赖 async 工具的 helper 必须跟着 async 化，不能教条保持同步**。
+      - 端到端 3 用例（真进程 SIGTERM/SIGKILL/并发双杀）真实验证通过。
 - **第四批 `_web` 工具（新写，直接 async 起步，立范式）**：
   - `httpx.AsyncClient` + `AsyncOpenAI`（真异步）。
   - **需求**：`fetch_web` 抓取内容后，若超过 1 万 chars，用 **secondary model** 对内容做精简（LLM 调用）再返回。

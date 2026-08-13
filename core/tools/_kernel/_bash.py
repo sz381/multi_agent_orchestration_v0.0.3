@@ -32,11 +32,11 @@
   lsof 探测一致，进程反复重启的极端场景下可能保守误拒
 """
 
+import asyncio
 import json
 import os
 import re
 import signal
-import subprocess
 import time
 
 from core.tools._kernel.constants import (
@@ -48,11 +48,11 @@ from core.tools._kernel.constants import (
     KILL_POLL_INTERVAL,
     KILL_SYSTEM_PROCESS_NAMES,
 )
-from core.tools._kernel.sandbox.executor import run as sandbox_run
+from core.tools._kernel.sandbox.executor import arun as sandbox_run
 from utils.settings import settings
 
 
-def bash(
+async def bash(
     cmd: str,
     cwd: str = ".",
     timeout: int = 30,
@@ -61,6 +61,10 @@ def bash(
     """在 Seatbelt 沙箱中执行 shell 命令。
 
     ⚠️ 本模块仅支持 macOS（sandbox-exec + Seatbelt 沙箱）。
+
+    执行模型：参数校验、黑名单与路径安全链（纯 CPU）留在事件循环；
+    sandbox-exec 子进程由事件循环直接管理（asyncio.create_subprocess_exec），
+    不占用线程池线程且超时可取消（wait_for + 整组 SIGKILL）。
 
     参数：
         cmd：要执行的 shell 命令。
@@ -163,9 +167,9 @@ def bash(
     # 记录开始时间，用于计算耗时
     started = time.monotonic()
 
-    # 执行命令
+    # 执行命令（真异步：子进程由事件循环管理，不占线程池）
     try:
-        result = sandbox_run(
+        result = await sandbox_run(
             cmd=cmd,
             workspace=safe_root,
             cwd=cwd,
@@ -204,61 +208,109 @@ def bash(
     }, ensure_ascii=False)
 
 
-def _lsof_pids(port: int) -> list[int]:
-    """返回监听指定 TCP 端口的 PID 列表（lsof 退出码 1 表示无匹配）。"""
-    result = subprocess.run(
-        ["lsof", "-ti", f"tcp:{port}"],
-        capture_output=True, text=True, timeout=5,
+async def _run_probe(args: list[str]) -> tuple[int, str]:
+    """运行短时探测命令（lsof/ps），返回 (returncode, stdout)。
+
+    供 kill_specific_process 的进程探测复用：子进程由事件循环直接管理
+    （create_subprocess_exec），不占用线程池线程；超时（>5s）时先
+    kill 收尸再抛 TimeoutError，由调用方决定降级语义。
+
+    Args:
+        args: 探测命令 argv 列表（如 ["lsof", "-ti", "tcp:8000"]）。
+
+    Returns:
+        (returncode, stdout 文本)；stdout 以 utf-8 容错解码。
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    if result.returncode != 0:
-        return []
-    return [int(pid) for pid in result.stdout.split() if pid.strip().isdigit()]
-
-
-def _process_comm(pid: int) -> str:
-    """返回进程名（ps 的 comm 字段）；进程不存在或获取失败返回空串。"""
     try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "comm="],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+    except TimeoutError:
+        # wait_for 已取消 communicate，先终止再收尸，避免探测进程泄漏
+        proc.kill()
+        await proc.wait()
+        raise
+    return proc.returncode, stdout_bytes.decode("utf-8", errors="replace")
+
+
+async def _lsof_pids(port: int) -> list[int]:
+    """返回监听指定 TCP 端口的 PID 列表（lsof 退出码 1 表示无匹配）。
+
+    Args:
+        port: 要查询的 TCP 端口。
+
+    Returns:
+        PID 列表；lsof 无匹配或输出无有效数字时为空列表。
+        探测超时抛 TimeoutError，由调用方兜底转 error 响应。
+    """
+    returncode, stdout = await _run_probe(["lsof", "-ti", f"tcp:{port}"])
+    if returncode != 0:
+        return []
+    return [int(pid) for pid in stdout.split() if pid.strip().isdigit()]
+
+
+async def _process_comm(pid: int) -> str:
+    """返回进程名（ps 的 comm 字段）；进程不存在或获取失败返回空串。
+
+    Args:
+        pid: 目标进程 ID。
+
+    Returns:
+        进程名；探测失败（含超时/进程不存在）返回空串。
+    """
+    try:
+        returncode, stdout = await _run_probe(["ps", "-p", str(pid), "-o", "comm="])
+        if returncode == 0:
+            return stdout.strip()
     except Exception:
         pass
     return ""
 
 
-def _pid_alive(pid: int) -> bool:
+async def _pid_alive(pid: int) -> bool:
     """检查进程是否存活（ps 状态字段；僵尸 Z 视为已退出）。
 
     不能用 os.kill(pid, 0) 探测：进程被 SIGKILL 后若父进程未 reap，
     会以僵尸态存在，0 信号探测仍返回存在，导致误报"未退出"。
+
+    Args:
+        pid: 目标进程 ID。
+
+    Returns:
+        True 表示存活；ps 探测失败时保守视为存活（后续有权限错误兜底）。
     """
     try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "stat="],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
+        returncode, stdout = await _run_probe(["ps", "-p", str(pid), "-o", "stat="])
+        if returncode != 0:
             return False  # 进程不存在
-        stat = result.stdout.strip()
+        stat = stdout.strip()
         return bool(stat) and "Z" not in stat
     except Exception:
-        return True  # ps 探测失败时保守视为存活（后续有权限错误兜底）
+        return True
 
 
-def _wait_exit(pid: int, seconds: float) -> bool:
-    """轮询等待进程退出，最多 seconds 秒；已退出返回 True。"""
+async def _wait_exit(pid: int, seconds: float) -> bool:
+    """轮询等待进程退出，最多 seconds 秒；已退出返回 True。
+
+    Args:
+        pid:     目标进程 ID。
+        seconds: 最长等待秒数。
+
+    Returns:
+        True 表示已退出；超时仍存活返回 False。
+    """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if not _pid_alive(pid):
+        if not await _pid_alive(pid):
             return True
-        time.sleep(KILL_POLL_INTERVAL)
-    return not _pid_alive(pid)
+        await asyncio.sleep(KILL_POLL_INTERVAL)
+    return not await _pid_alive(pid)
 
 
-def kill_specific_process(port: int) -> str:
+async def kill_specific_process(port: int) -> str:
     """杀死监听指定端口的进程（bash 沙箱的安全出口）。
 
     ⚠️ 仅 macOS。Seatbelt 沙箱规则只允许 (allow signal (target self))，
@@ -273,6 +325,10 @@ def kill_specific_process(port: int) -> str:
 
     信号策略：先 SIGTERM 优雅终止，KILL_GRACE_SECONDS 秒内未退出自动
     升级 SIGKILL，再等待 KILL_CONFIRM_SECONDS 确认退出。
+
+    执行模型：参数校验与白名单检查（纯 CPU）留在事件循环；lsof/ps 探测
+    子进程由事件循环直接管理（create_subprocess_exec），退出轮询用
+    asyncio.sleep 异步休眠，不占用线程池线程。
 
     参数：
         port：目标端口（1~65535）。
@@ -308,7 +364,7 @@ def kill_specific_process(port: int) -> str:
 
     # 定位监听进程（沙箱外只读操作，lsof 是 macOS 自带工具）
     try:
-        pids = _lsof_pids(port)
+        pids = await _lsof_pids(port)
     except Exception as exc:
         return json.dumps({
             "status": "error",
@@ -337,7 +393,7 @@ def kill_specific_process(port: int) -> str:
                 "message": f"Refusing to kill PID {pid} (agent itself or init).",
             }, ensure_ascii=False)
 
-        name = _process_comm(pid)
+        name = await _process_comm(pid)
         if not name:
             return json.dumps({
                 "status": "error",
@@ -357,7 +413,7 @@ def kill_specific_process(port: int) -> str:
 
         # TOCTOU 防护：kill 前二次校验 PID 仍监听该端口（防 PID 复用误杀）
         try:
-            current = _lsof_pids(port)
+            current = await _lsof_pids(port)
         except Exception as exc:
             return json.dumps({
                 "status": "error",
@@ -390,7 +446,7 @@ def kill_specific_process(port: int) -> str:
         # 等待优雅退出；超时未退出则升级 SIGKILL 强制终止
         signal_used = "SIGTERM"
         graceful = True
-        if not _wait_exit(pid, KILL_GRACE_SECONDS):
+        if not await _wait_exit(pid, KILL_GRACE_SECONDS):
             try:
                 os.kill(pid, signal.SIGKILL)
                 signal_used = "SIGKILL"
@@ -406,7 +462,7 @@ def kill_specific_process(port: int) -> str:
                 }, ensure_ascii=False)
 
         # SIGKILL 后确认退出（不可中断状态/僵尸可能残留）
-        if not _wait_exit(pid, KILL_CONFIRM_SECONDS):
+        if not await _wait_exit(pid, KILL_CONFIRM_SECONDS):
             return json.dumps({
                 "status": "error",
                 "tool_name": "kill_specific_process",

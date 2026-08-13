@@ -22,6 +22,7 @@
 - 本模块仅存放测试辅助函数，不包含测试用例
 """
 
+import asyncio
 import json
 import os
 import random
@@ -186,12 +187,15 @@ def start_port_listener(mode: str = "graceful"):
     raise RuntimeError("listener did not become ready in 5s")
 
 
-def _wait_port_free(port: int, seconds: float = 3) -> bool:
+async def _wait_port_free(port: int, seconds: float = 3) -> bool:
     """轮询等待端口不再被监听（TIME_WAIT 残留连接可能短暂干扰 lsof）。
 
     调用 kill_specific_process 后，进程退出与端口释放之间存在内核
     回收窗口（残留连接的 TIME_WAIT 会让 lsof 短暂仍报该端口），
     单次断言会 flaky，必须轮询。
+
+    异步：依赖已 async 化的 _bash._lsof_pids，轮询用 asyncio.sleep
+    不阻塞事件循环。
 
     Returns:
         端口在 seconds 秒内释放返回 True，超时返回 False。
@@ -200,9 +204,9 @@ def _wait_port_free(port: int, seconds: float = 3) -> bool:
 
     deadline = time.time() + seconds
     while time.time() < deadline:
-        if not _bash._lsof_pids(port):
+        if not await _bash._lsof_pids(port):
             return True
-        time.sleep(0.1)
+        await asyncio.sleep(0.1)
     return False
 
 
