@@ -84,12 +84,13 @@ from core.tools._kernel._fs_readonly import grep_tool
 from tests.helpers import make_file, read_json, rels
 
 
-def test_grep_single_file_path(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_single_file_path(grep_tree):
     """基础匹配：单文件：验证 path 指向文件时只搜该文件。
 
     a.py 中 foo 命中 3 行（L1/L2/L5），files_scanned=1 证明没有遍历其他文件。
     """
-    resp = read_json(grep_tool("foo", path="a.py"))
+    resp = read_json(await grep_tool("foo", path="a.py"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 3
     assert resp["files_scanned"] == 1
@@ -97,13 +98,14 @@ def test_grep_single_file_path(grep_tree):
     assert rels(grep_tree, resp["files"]) == {"a.py"}
 
 
-def test_grep_directory_recursive(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_directory_recursive(grep_tree):
     """基础匹配：目录递归：验证默认 path='.' 递归搜索全部文件。
 
     - total_matches=8：a.py 3 + b.py 2 + sub/c.py 1 + deep/nested/e.py 1 + .hidden.txt 1
     - 命中文件恰好 5 个，.DS_Store（排除文件）与 .venv/f.py（排除目录）不出现
     """
-    resp = read_json(grep_tool("foo"))
+    resp = read_json(await grep_tool("foo"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 8
     assert rels(grep_tree, resp["files"]) == {
@@ -111,37 +113,40 @@ def test_grep_directory_recursive(grep_tree):
     }
 
 
-def test_grep_case_sensitive_default(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_case_sensitive_default(grep_tree):
     """大小写：默认敏感：验证 FOO 不被 foo 命中。
 
     a.py L4 是 FOO case，默认区分大小写时 a.py 仍只有 3 条匹配。
     """
-    resp = read_json(grep_tool("foo", path="a.py"))
+    resp = read_json(await grep_tool("foo", path="a.py"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 3
 
-    resp = read_json(grep_tool("FOO", path="a.py"))
+    resp = read_json(await grep_tool("FOO", path="a.py"))
     assert resp["total_matches"] == 1
 
 
-def test_grep_case_insensitive(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_case_insensitive(grep_tree):
     """大小写：忽略：验证 case_sensitive=False 时 FOO 也命中。
 
     a.py L4 的 FOO case 被计入，a.py 匹配数从 3 涨到 4，全树从 8 涨到 9。
     """
-    resp = read_json(grep_tool("foo", case_sensitive=False, output_mode="count"))
+    resp = read_json(await grep_tool("foo", case_sensitive=False, output_mode="count"))
     assert resp["status"] == "ok"
     assert resp["total_occurrences"] == 9
     abs_a = os.path.realpath(str(grep_tree / "a.py"))
     assert resp["results"][abs_a] == 4
 
 
-def test_grep_glob_pattern_filter(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_glob_pattern_filter(grep_tree):
     """glob_pattern：后缀过滤：验证 *.py 只搜 Python 文件。
 
     .hidden.txt 与 sub/d.txt 被滤掉，命中从 8 降到 7（a 3 + b 2 + c 1 + e 1）。
     """
-    resp = read_json(grep_tool("foo", glob_pattern="*.py"))
+    resp = read_json(await grep_tool("foo", glob_pattern="*.py"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 7
     assert rels(grep_tree, resp["files"]) == {
@@ -149,24 +154,26 @@ def test_grep_glob_pattern_filter(grep_tree):
     }
 
 
-def test_grep_glob_pattern_matches_basename(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_glob_pattern_matches_basename(grep_tree):
     """glob_pattern：basename 语义：验证精确文件名模式命中子目录文件。
 
     glob_pattern="c.py" 应命中 sub/c.py——回归锁定：若按含路径段的 rel 匹配，
     子目录同名文件会被静默滤掉（历史 bug）。
     """
-    resp = read_json(grep_tool("foo", glob_pattern="c.py"))
+    resp = read_json(await grep_tool("foo", glob_pattern="c.py"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 1
     assert rels(grep_tree, resp["files"]) == {"sub/c.py"}
 
 
-def test_grep_files_with_matches_mode(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_files_with_matches_mode(grep_tree):
     """输出模式：files_with_matches：验证文件列表去重且字段完备。
 
     a.py 贡献 3 条匹配，但 files 中只出现一次（去重），total_files=5。
     """
-    resp = read_json(grep_tool("foo"))
+    resp = read_json(await grep_tool("foo"))
     assert resp["status"] == "ok"
     assert resp["output_mode"] == "files_with_matches"
     assert resp["total_matches"] == 8
@@ -179,12 +186,13 @@ def test_grep_files_with_matches_mode(grep_tree):
     assert resp["search_timed_out"] is False
 
 
-def test_grep_count_mode(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_count_mode(grep_tree):
     """输出模式：count：验证按文件计数与字段完备。
 
     results 键为绝对路径，a.py=3、b.py=2，total_occurrences=8。
     """
-    resp = read_json(grep_tool("foo", output_mode="count"))
+    resp = read_json(await grep_tool("foo", output_mode="count"))
     assert resp["status"] == "ok"
     assert resp["output_mode"] == "count"
     assert resp["total_occurrences"] == 8
@@ -201,14 +209,15 @@ def test_grep_count_mode(grep_tree):
     }
 
 
-def test_grep_count_respects_pagination(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_count_respects_pagination(grep_tree):
     """输出模式：count 分页契约：验证 count 受 head_limit 限制（现状锁定）。
 
     当前实现 count 基于页内匹配（page_matches）：head_limit=2 时只数前 2 条，
     total_occurrences=2 而 total_matches=3（全局）。该行为为当前契约，测试锁定
     防止无意改动；若未来改为全量统计需同步更新本用例。
     """
-    resp = read_json(grep_tool("foo", path="a.py", output_mode="count", head_limit=2))
+    resp = read_json(await grep_tool("foo", path="a.py", output_mode="count", head_limit=2))
     assert resp["status"] == "ok"
     assert resp["total_occurrences"] == 2
     assert resp["total_matches"] == 3
@@ -216,12 +225,13 @@ def test_grep_count_respects_pagination(grep_tree):
     assert resp["page"] == {"offset": 0, "limit": 2}
 
 
-def test_grep_content_mode(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_content_mode(grep_tree):
     """输出模式：content：验证上下文块结构与 match 标记。
 
     a.py 的 foo 命中 L1/L2/L5，results 键为绝对路径，每个块恰好一个 match=True。
     """
-    resp = read_json(grep_tool("foo", path="a.py", output_mode="content"))
+    resp = read_json(await grep_tool("foo", path="a.py", output_mode="content"))
     assert resp["status"] == "ok"
     assert resp["output_mode"] == "content"
     abs_a = os.path.realpath(str(grep_tree / "a.py"))
@@ -234,12 +244,13 @@ def test_grep_content_mode(grep_tree):
     assert [line["content"] for line in hit_lines] == ["foo bar", "hello foo", "foo"]
 
 
-def test_grep_content_context_lines_zero(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_content_context_lines_zero(grep_tree):
     """输出模式：content 上下文：验证 context_lines=0 只输出命中行。
 
     每个块恰好 1 行且 match=True，行号与内容一一对应。
     """
-    resp = read_json(
+    resp = read_json(await
         grep_tool("foo", path="a.py", output_mode="content", context_lines=0)
     )
     abs_a = os.path.realpath(str(grep_tree / "a.py"))
@@ -251,13 +262,14 @@ def test_grep_content_context_lines_zero(grep_tree):
     assert [c[0]["line_num"] for c in chunks] == [1, 2, 5]
 
 
-def test_grep_content_context_lines_two(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_content_context_lines_two(grep_tree):
     """输出模式：content 上下文扩展：验证 context_lines=2 向两侧扩展并 clamp。
 
     L1 命中块覆盖 L1-L3；L5 命中块覆盖 L3-L5（尾部 clamp 到文件边界）；
     每块 match 标记恰好唯一指向命中行。
     """
-    resp = read_json(
+    resp = read_json(await
         grep_tool("foo", path="a.py", output_mode="content", context_lines=2)
     )
     abs_a = os.path.realpath(str(grep_tree / "a.py"))
@@ -271,12 +283,13 @@ def test_grep_content_context_lines_two(grep_tree):
     ]
 
 
-def test_grep_offset_pagination(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_offset_pagination(grep_tree):
     """分页：offset：验证跳过前 N 条匹配。
 
     a.py 命中 L1/L2/L5，offset=1 后只剩 2 条，首块命中行应为 L2。
     """
-    resp = read_json(
+    resp = read_json(await
         grep_tool("foo", path="a.py", output_mode="content", offset=1)
     )
     assert resp["status"] == "ok"
@@ -287,12 +300,13 @@ def test_grep_offset_pagination(grep_tree):
     assert first_hit["line_num"] == 2
 
 
-def test_grep_head_limit_truncated(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_head_limit_truncated(grep_tree):
     """分页：head_limit：验证截断到前 N 条且 truncated=True。
 
     a.py 共 3 条，head_limit=2 只返回 2 条，truncated = (0+2) < 3 = True。
     """
-    resp = read_json(grep_tool("foo", path="a.py", output_mode="content", head_limit=2))
+    resp = read_json(await grep_tool("foo", path="a.py", output_mode="content", head_limit=2))
     assert resp["status"] == "ok"
     abs_a = os.path.realpath(str(grep_tree / "a.py"))
     assert len(resp["results"][abs_a]) == 2
@@ -300,226 +314,247 @@ def test_grep_head_limit_truncated(grep_tree):
     assert resp["total_matches"] == 3
 
 
-def test_grep_head_limit_zero(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_head_limit_zero(grep_tree):
     """分页：head_limit=0：验证 0 表示不限制。
 
     a.py 3 条匹配全部返回，truncated=False。
     """
-    resp = read_json(grep_tool("foo", path="a.py", output_mode="content", head_limit=0))
+    resp = read_json(await grep_tool("foo", path="a.py", output_mode="content", head_limit=0))
     assert resp["status"] == "ok"
     abs_a = os.path.realpath(str(grep_tree / "a.py"))
     assert len(resp["results"][abs_a]) == 3
     assert resp["truncated"] is False
 
 
-def test_grep_page_field(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_page_field(grep_tree):
     """分页：page 字段：验证携带 offset/limit 便于 LLM 续页。
 
     默认 head_limit=200，显式传 5 后 page.limit 应反映实际传入值。
     """
-    resp = read_json(grep_tool("foo", path="a.py"))
+    resp = read_json(await grep_tool("foo", path="a.py"))
     assert resp["page"] == {"offset": 0, "limit": 200}
 
-    resp = read_json(grep_tool("foo", path="a.py", head_limit=5, offset=1))
+    resp = read_json(await grep_tool("foo", path="a.py", head_limit=5, offset=1))
     assert resp["page"] == {"offset": 1, "limit": 5}
 
 
-def test_grep_offset_exceeds_error(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_offset_exceeds_error(grep_tree):
     """分页：offset 越界：验证 offset >= total_matches 返回 error。
 
     a.py 共 3 条匹配，offset=3 已无结果可分页，报错而非空结果。
     """
-    resp = read_json(grep_tool("foo", path="a.py", offset=3))
+    resp = read_json(await grep_tool("foo", path="a.py", offset=3))
     assert resp["status"] == "error"
     assert "offset 3 exceeds total matches 3" in resp["message"]
 
 
-def test_grep_regex_anchors(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_regex_anchors(grep_tree):
     """正则语义：锚点：验证 pattern 按正则编译而非字面量。
 
     ^foo 只命中行首：a.py L1/L5、b.py L2、sub/c.py L2、deep/nested/e.py L1、
     .hidden.txt L1，共 6 条（b.py L1 "bar foo" 与 a.py L2 "hello foo" 不命中）。
     """
-    resp = read_json(grep_tool("^foo"))
+    resp = read_json(await grep_tool("^foo"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 6
 
 
 @pytest.mark.parametrize("pattern", ["", "   "])
-def test_grep_invalid_pattern(grep_tree, pattern):
+@pytest.mark.asyncio
+async def test_grep_invalid_pattern(grep_tree, pattern):
     """参数校验：pattern：验证空/空白模式拒绝。
 
     2 组参数化用例，断言 error 且 message 指明 pattern。
     """
-    resp = read_json(grep_tool(pattern))
+    resp = read_json(await grep_tool(pattern))
     assert resp["status"] == "error"
     assert "pattern must not be empty" in resp["message"]
 
 
 @pytest.mark.parametrize("path", ["", "   "])
-def test_grep_invalid_path(grep_tree, path):
+@pytest.mark.asyncio
+async def test_grep_invalid_path(grep_tree, path):
     """参数校验：path：验证空/空白路径拒绝。
 
     2 组参数化用例，断言 error 且 message 指明 path。
     """
-    resp = read_json(grep_tool("foo", path=path))
+    resp = read_json(await grep_tool("foo", path=path))
     assert resp["status"] == "error"
     assert "path must not be empty" in resp["message"]
 
 
 @pytest.mark.parametrize("glob_pattern", ["", "   "])
-def test_grep_invalid_glob_pattern(grep_tree, glob_pattern):
+@pytest.mark.asyncio
+async def test_grep_invalid_glob_pattern(grep_tree, glob_pattern):
     """参数校验：glob_pattern：验证空/空白模式拒绝。
 
     2 组参数化用例，断言 error 且 message 指明 glob_pattern。
     """
-    resp = read_json(grep_tool("foo", glob_pattern=glob_pattern))
+    resp = read_json(await grep_tool("foo", glob_pattern=glob_pattern))
     assert resp["status"] == "error"
     assert "glob_pattern must not be empty" in resp["message"]
 
 
 @pytest.mark.parametrize("glob_pattern", ["**", "**/*.py", "a/**"])
-def test_grep_glob_double_star(grep_tree, glob_pattern):
+@pytest.mark.asyncio
+async def test_grep_glob_double_star(grep_tree, glob_pattern):
     """参数校验：glob_pattern **：验证递归模式拒绝。
 
     3 组参数化用例：** 在 fnmatch（匹配 basename）中与 * 等价无递归语义，
     拒绝并提示改用 glob_tool，避免误导。
     """
-    resp = read_json(grep_tool("foo", glob_pattern=glob_pattern))
+    resp = read_json(await grep_tool("foo", glob_pattern=glob_pattern))
     assert resp["status"] == "error"
     assert "does not support '**'" in resp["message"]
 
 
 @pytest.mark.parametrize("glob_pattern", ["/etc/*.py", "///"])
-def test_grep_glob_absolute(grep_tree, glob_pattern):
+@pytest.mark.asyncio
+async def test_grep_glob_absolute(grep_tree, glob_pattern):
     """参数校验：glob_pattern 绝对路径：验证拒绝。
 
     2 组参数化用例：绝对路径模式对 basename 永远匹配不到，isabs 检查拦截。
     """
-    resp = read_json(grep_tool("foo", glob_pattern=glob_pattern))
+    resp = read_json(await grep_tool("foo", glob_pattern=glob_pattern))
     assert resp["status"] == "error"
     assert "absolute paths are not allowed" in resp["message"]
 
 
 @pytest.mark.parametrize("glob_pattern", ["../x/*.py", "a/../b.py"])
-def test_grep_glob_path_traversal(grep_tree, glob_pattern):
+@pytest.mark.asyncio
+async def test_grep_glob_path_traversal(grep_tree, glob_pattern):
     """参数校验：glob_pattern 穿越：验证 .. 组件拒绝。
 
     2 组参数化用例（前缀与中间），无安全风险但结果恒为空，提前报错避免困惑。
     """
-    resp = read_json(grep_tool("foo", glob_pattern=glob_pattern))
+    resp = read_json(await grep_tool("foo", glob_pattern=glob_pattern))
     assert resp["status"] == "error"
     assert "must not contain '..'" in resp["message"]
 
 
-def test_grep_glob_path_separator(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_glob_path_separator(grep_tree):
     """参数校验：glob_pattern 路径分隔符：验证含 / 相对模式拒绝。
 
     "src/*.py" 等模式永远匹配不到 basename，提示用 path 参数限定目录。
     """
-    resp = read_json(grep_tool("foo", glob_pattern="src/*.py"))
+    resp = read_json(await grep_tool("foo", glob_pattern="src/*.py"))
     assert resp["status"] == "error"
     assert "path separators are not allowed" in resp["message"]
     assert "use the path parameter" in resp["message"]
 
 
-def test_grep_invalid_output_mode(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_invalid_output_mode(grep_tree):
     """参数校验：output_mode：验证未知模式拒绝并列出可用值。
     """
-    resp = read_json(grep_tool("foo", output_mode="unknown"))
+    resp = read_json(await grep_tool("foo", output_mode="unknown"))
     assert resp["status"] == "error"
     assert "Unknown output_mode" in resp["message"]
     assert "files_with_matches" in resp["message"]
 
 
 @pytest.mark.parametrize("context_lines", [-1, 11, True, 1.5, "2"])
-def test_grep_invalid_context_lines(grep_tree, context_lines):
+@pytest.mark.asyncio
+async def test_grep_invalid_context_lines(grep_tree, context_lines):
     """参数校验：context_lines：验证越界与类型错误拒绝。
 
     5 组参数化用例：负数/超上限/float/str 均拒绝；
     True 是 int 子类（True < 10 成立），必须显式排除，否则语义错误地通过。
     """
-    resp = read_json(grep_tool("foo", context_lines=context_lines))
+    resp = read_json(await grep_tool("foo", context_lines=context_lines))
     assert resp["status"] == "error"
     assert "context_lines must be an integer between 0 and 10" in resp["message"]
 
 
 @pytest.mark.parametrize("head_limit", [-1, 1001, True, 1.5])
-def test_grep_invalid_head_limit(grep_tree, head_limit):
+@pytest.mark.asyncio
+async def test_grep_invalid_head_limit(grep_tree, head_limit):
     """参数校验：head_limit：验证越界与类型错误拒绝。
 
     4 组参数化用例：负数/超上限/float/True（bool 需排除）均拒绝。
     """
-    resp = read_json(grep_tool("foo", head_limit=head_limit))
+    resp = read_json(await grep_tool("foo", head_limit=head_limit))
     assert resp["status"] == "error"
     assert "head_limit must be an integer between 0 and 1000" in resp["message"]
 
 
 @pytest.mark.parametrize("offset", [-1, True, 1.5])
-def test_grep_invalid_offset(grep_tree, offset):
+@pytest.mark.asyncio
+async def test_grep_invalid_offset(grep_tree, offset):
     """参数校验：offset：验证负值与类型错误拒绝。
 
     3 组参数化用例：负数/float/True（bool 需排除）均拒绝。
     """
-    resp = read_json(grep_tool("foo", offset=offset))
+    resp = read_json(await grep_tool("foo", offset=offset))
     assert resp["status"] == "error"
     assert "offset must be a non-negative integer" in resp["message"]
 
 
 @pytest.mark.parametrize("pattern", ["(", "[a", "*a"])
-def test_grep_invalid_regex(grep_tree, pattern):
+@pytest.mark.asyncio
+async def test_grep_invalid_regex(grep_tree, pattern):
     """参数校验：正则编译：验证非法正则拒绝。
 
     3 组参数化用例：未闭合括号/未闭合字符类/裸量词，编译期报错返回 error，
     而不是在搜索阶段裸炸。
     """
-    resp = read_json(grep_tool(pattern))
+    resp = read_json(await grep_tool(pattern))
     assert resp["status"] == "error"
     assert "Invalid regex pattern" in resp["message"]
 
 
-def test_grep_path_outside_denied(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_path_outside_denied(grep_tree):
     """路径安全：越界：验证 ../ 跳出工作区被拦截。
 
     ../outside 拼接并经 realpath 归一化后落在工作区外，前缀检查按目录边界拒绝。
     """
-    resp = read_json(grep_tool("foo", path="../outside"))
+    resp = read_json(await grep_tool("foo", path="../outside"))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
 
-def test_grep_path_absolute_outside_denied(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_path_absolute_outside_denied(grep_tree):
     """路径安全：系统路径：验证 /etc 等绝对路径被拦截。
 
     前缀检查先于存在性检查：即使 /etc 真实存在，越界即拒绝。
     """
-    resp = read_json(grep_tool("foo", path="/etc"))
+    resp = read_json(await grep_tool("foo", path="/etc"))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
 
-def test_grep_path_does_not_exist(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_path_does_not_exist(grep_tree):
     """路径安全：不存在：验证工作区内不存在的路径拒绝。
 
     存在性检查在越界检查之后，'nope' 合法但不存在的路径报 does not exist。
     """
-    resp = read_json(grep_tool("foo", path="nope"))
+    resp = read_json(await grep_tool("foo", path="nope"))
     assert resp["status"] == "error"
     assert "does not exist" in resp["message"]
 
 
-def test_grep_path_absolute_inside(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_path_absolute_inside(grep_tree):
     """路径安全：绝对路径：验证工作区内绝对路径与相对路径等价。
 
     isabs 分支直接 realpath 后做前缀检查，工作区内绝对路径应放行。
     """
     abs_ws = os.path.realpath(str(grep_tree))
-    resp = read_json(grep_tool("foo", path=abs_ws))
+    resp = read_json(await grep_tool("foo", path=abs_ws))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 8
 
 
-def test_grep_allow_external_reads(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_allow_external_reads(grep_tree):
     """路径安全：外部放行：验证 allow_external_reads 开关生效。
 
     目录建在工作区外：
@@ -530,58 +565,62 @@ def test_grep_allow_external_reads(grep_tree):
     outside.mkdir(exist_ok=True)
     (outside / "out.txt").write_text("foo out\n", encoding="utf-8")
 
-    resp = read_json(grep_tool("foo", path=str(outside)))
+    resp = read_json(await grep_tool("foo", path=str(outside)))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
-    resp = read_json(grep_tool("foo", path=str(outside), allow_external_reads=True))
+    resp = read_json(await grep_tool("foo", path=str(outside), allow_external_reads=True))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 1
 
 
-def test_grep_exclude_dirs(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_exclude_dirs(grep_tree):
     """排除规则：排除目录：验证 .venv 内部文件不进入搜索。
 
     即使内容含 foo，.venv/f.py 也不出现在结果中（目录在遍历阶段被剪枝）。
     """
-    resp = read_json(grep_tool("foo", output_mode="count"))
+    resp = read_json(await grep_tool("foo", output_mode="count"))
     got = rels(grep_tree, list(resp["results"].keys()))
     assert ".venv/f.py" not in got
 
 
-def test_grep_exclude_files(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_exclude_files(grep_tree):
     """排除规则：排除文件：验证 .DS_Store 匹配到也被过滤。
 
     文件收集阶段直接滤掉，不进入搜索阶段。
     """
-    resp = read_json(grep_tool("foo"))
+    resp = read_json(await grep_tool("foo"))
     got = rels(grep_tree, resp["files"])
     assert ".DS_Store" not in got
     assert resp["files_scanned"] == 6
 
 
-def test_grep_max_files_truncated(grep_tree, monkeypatch):
+@pytest.mark.asyncio
+async def test_grep_max_files_truncated(grep_tree, monkeypatch):
     """上限：收集截断：验证文件数达 GREP_MAX_FILES 停止收集。
 
     将 GREP_MAX_FILES 压到 2：收集到 2 个文件即熔断，
     files_scanned=2、files_truncated=True，后续文件不再搜索。
     """
     monkeypatch.setattr(_fs_readonly, "GREP_MAX_FILES", 2)
-    resp = read_json(grep_tool("foo"))
+    resp = read_json(await grep_tool("foo"))
     assert resp["status"] == "ok"
     assert resp["files_scanned"] == 2
     assert resp["files_truncated"] is True
     assert 0 < resp["total_matches"] < 8
 
 
-def test_grep_large_file_skipped(grep_tree, monkeypatch):
+@pytest.mark.asyncio
+async def test_grep_large_file_skipped(grep_tree, monkeypatch):
     """上限：单文件大小：验证超过 GREP_MAX_FILE_SIZE 的文件跳过并报告。
 
     将上限压到 20 字节：a.py（44 字节）被跳过，计入 skipped_large_files，
     结果中不含 a.py，其余文件正常命中（8 - 3 = 5 条）。
     """
     monkeypatch.setattr(_fs_readonly, "GREP_MAX_FILE_SIZE", 20)
-    resp = read_json(grep_tool("foo"))
+    resp = read_json(await grep_tool("foo"))
     assert resp["status"] == "ok"
     abs_a = os.path.realpath(str(grep_tree / "a.py"))
     assert resp["skipped_large_files"] == 1
@@ -591,7 +630,8 @@ def test_grep_large_file_skipped(grep_tree, monkeypatch):
     assert abs_a not in resp["files"]
 
 
-def test_grep_binary_file_skipped(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_binary_file_skipped(grep_tree):
     """二进制：NUL 嗅探：验证含 NUL 的二进制文件静默跳过。
 
     bin.dat 头部含 NUL 且编码为 utf-8（不在 UTF-16/32 白名单），
@@ -599,14 +639,15 @@ def test_grep_binary_file_skipped(grep_tree):
     """
     (grep_tree / "bin.dat").write_bytes(b"foo\x00bar\n")
 
-    resp = read_json(grep_tool("foo"))
+    resp = read_json(await grep_tool("foo"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 8
     got = rels(grep_tree, resp["files"])
     assert "bin.dat" not in got
 
 
-def test_grep_utf16_whitelist(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_utf16_whitelist(grep_tree):
     """二进制：UTF-16 白名单：验证 UTF-16 编码文件正常搜索。
 
     UTF-16 文本天然含 NUL 字节，白名单放行；需传 encoding="utf-16"
@@ -614,13 +655,14 @@ def test_grep_utf16_whitelist(grep_tree):
     """
     (grep_tree / "utf16.txt").write_text("foo\n", encoding="utf-16")
 
-    resp = read_json(grep_tool("foo", path="utf16.txt", encoding="utf-16"))
+    resp = read_json(await grep_tool("foo", path="utf16.txt", encoding="utf-16"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 1
     assert rels(grep_tree, resp["files"]) == {"utf16.txt"}
 
 
-def test_grep_undecodable_skipped(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_undecodable_skipped(grep_tree):
     """编码：解码失败：验证非法 UTF-8 文件静默跳过。
 
     bad.bin 字节不合法且无 NUL（不触发二进制嗅探），读文件时
@@ -628,14 +670,15 @@ def test_grep_undecodable_skipped(grep_tree):
     """
     (grep_tree / "bad.bin").write_bytes(b"\xff\xfe\xfa\xfbfoo\n")
 
-    resp = read_json(grep_tool("foo"))
+    resp = read_json(await grep_tool("foo"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 8
     got = rels(grep_tree, resp["files"])
     assert "bad.bin" not in got
 
 
-def test_grep_encoding_param(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_encoding_param(grep_tree):
     """编码：encoding 参数：验证指定编码后可搜索非 utf-8 文件。
 
     latin1.txt 以 latin-1 编码（0xe9 非法 utf-8）：
@@ -644,15 +687,16 @@ def test_grep_encoding_param(grep_tree):
     """
     (grep_tree / "latin1.txt").write_bytes("caf\xe9 foo\n".encode("latin-1"))
 
-    resp = read_json(grep_tool("foo", path="latin1.txt"))
+    resp = read_json(await grep_tool("foo", path="latin1.txt"))
     assert resp["total_matches"] == 0
 
-    resp = read_json(grep_tool("foo", path="latin1.txt", encoding="latin-1"))
+    resp = read_json(await grep_tool("foo", path="latin1.txt", encoding="latin-1"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 1
 
 
-def test_grep_multiline_dotall(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_multiline_dotall(grep_tree):
     """multiline：DOTALL：验证 multiline=True 让 . 跨行匹配。
 
     ml.py 为 "xxxbar\\nhello foo\\n"，模式 "bar.*foo"：
@@ -661,15 +705,16 @@ def test_grep_multiline_dotall(grep_tree):
     """
     (grep_tree / "ml.py").write_text("xxxbar\nhello foo\n", encoding="utf-8")
 
-    resp = read_json(grep_tool("bar.*foo", path="ml.py"))
+    resp = read_json(await grep_tool("bar.*foo", path="ml.py"))
     assert resp["total_matches"] == 0
 
-    resp = read_json(grep_tool("bar.*foo", path="ml.py", multiline=True))
+    resp = read_json(await grep_tool("bar.*foo", path="ml.py", multiline=True))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 1
 
 
-def test_grep_multiline_line_num(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_multiline_line_num(grep_tree):
     """multiline：行号与行文本：验证跨行匹配取起点行且行文本完整。
 
     模式 "bar.*foo" 从 L1 的 "xxxbar" 中间开始匹配：
@@ -679,7 +724,7 @@ def test_grep_multiline_line_num(grep_tree):
     """
     (grep_tree / "ml.py").write_text("xxxbar\nhello foo\n", encoding="utf-8")
 
-    resp = read_json(
+    resp = read_json(await
         grep_tool("bar.*foo", path="ml.py", output_mode="content",
                   context_lines=0, multiline=True)
     )
@@ -691,7 +736,8 @@ def test_grep_multiline_line_num(grep_tree):
     assert chunk[0]["match"] is True
 
 
-def test_grep_regex_timeout_breakers(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_regex_timeout_breakers(grep_tree):
     """超时熔断：单行灾难性回溯：验证熔断该文件而非拖垮整体。
 
     模式 (a|aa)+$ 对 "a"*40+"b" 回溯指数爆炸，单行超
@@ -700,14 +746,15 @@ def test_grep_regex_timeout_breakers(grep_tree):
     """
     (grep_tree / "t.py").write_text("a" * 40 + "b\n", encoding="utf-8")
 
-    resp = read_json(grep_tool("(a|aa)+$", path="t.py"))
+    resp = read_json(await grep_tool("(a|aa)+$", path="t.py"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 0
     assert resp["timed_out_files"] == 1
     assert "1 files timed out" in resp["message"]
 
 
-def test_grep_total_timeout_partial_results(grep_tree, monkeypatch):
+@pytest.mark.asyncio
+async def test_grep_total_timeout_partial_results(grep_tree, monkeypatch):
     """超时熔断：总时长预算：验证预算耗尽返回部分结果并标记。
 
     将 GREP_TOTAL_TIMEOUT_SECONDS 压到 0.01s，造 5 个 2 万行文件：
@@ -718,13 +765,14 @@ def test_grep_total_timeout_partial_results(grep_tree, monkeypatch):
     for i in range(5):
         make_file(grep_tree, f"big{i}.py", 20000)
 
-    resp = read_json(grep_tool("x"))
+    resp = read_json(await grep_tool("x"))
     assert resp["status"] == "ok"
     assert resp["search_timed_out"] is True
     assert 0 < resp["total_matches"] < 100000
 
 
-def test_grep_total_timeout_normal(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_total_timeout_normal(grep_tree):
     """超时熔断：预算充足：验证不触发截断。
 
     同规模数据下默认预算（30s），全部 10 万行搜索完成，
@@ -733,20 +781,21 @@ def test_grep_total_timeout_normal(grep_tree):
     for i in range(5):
         make_file(grep_tree, f"big{i}.py", 20000)
 
-    resp = read_json(grep_tool("x"))
+    resp = read_json(await grep_tool("x"))
     assert resp["status"] == "ok"
     assert resp["search_timed_out"] is False
     assert resp["total_matches"] == 100000
 
 
-def test_grep_empty_result(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_empty_result(grep_tree):
     """空结果：契约：验证无匹配时的响应形态。
 
     - status=ok（无匹配不是错误）
     - total_matches=0、total_files=0、files_scanned=6（仍报告扫描规模）
     - 空结果分支无 page 字段（与正常分支区分）
     """
-    resp = read_json(grep_tool("xyz"))
+    resp = read_json(await grep_tool("xyz"))
     assert resp["status"] == "ok"
     assert resp["total_matches"] == 0
     assert resp["total_files"] == 0
@@ -756,17 +805,19 @@ def test_grep_empty_result(grep_tree):
     assert "page" not in resp
 
 
-def test_grep_empty_result_message(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_empty_result_message(grep_tree):
     """空结果：message：验证精确汇总格式。
 
     树中收集 6 个文件，message 精确格式为
     "No matches for 'xyz' in 6 files"。
     """
-    resp = read_json(grep_tool("xyz"))
+    resp = read_json(await grep_tool("xyz"))
     assert resp["message"] == "No matches for 'xyz' in 6 files"
 
 
-def test_grep_absolute_paths(grep_tree):
+@pytest.mark.asyncio
+async def test_grep_absolute_paths(grep_tree):
     """结果形态：绝对路径：验证三种输出模式的路径均为工作区内绝对路径。
 
     files_with_matches 的 files、count 的 results 键、content 的 results 键
@@ -774,11 +825,11 @@ def test_grep_absolute_paths(grep_tree):
     """
     abs_ws = os.path.realpath(str(grep_tree))
 
-    resp = read_json(grep_tool("foo"))
+    resp = read_json(await grep_tool("foo"))
     assert all(f.startswith(abs_ws) for f in resp["files"])
 
-    resp = read_json(grep_tool("foo", output_mode="count"))
+    resp = read_json(await grep_tool("foo", output_mode="count"))
     assert all(k.startswith(abs_ws) for k in resp["results"])
 
-    resp = read_json(grep_tool("foo", output_mode="content"))
+    resp = read_json(await grep_tool("foo", output_mode="content"))
     assert all(k.startswith(abs_ws) for k in resp["results"])

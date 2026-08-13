@@ -75,26 +75,28 @@ from core.tools._kernel._fs_readonly import glob_tool
 from tests.helpers import read_json, rels
 
 
-def test_glob_star_py_matches_root(tree):
+@pytest.mark.asyncio
+async def test_glob_star_py_matches_root(tree):
     """基础匹配：*.py：验证单段模式只匹配根下文件、不递归子目录。
 
     - 根下 hello.py / main.py / x.py 应全部命中（count=3）
     - a/b.py、sub/nested/deep.py 在子目录中，不应出现
     """
-    resp = read_json(glob_tool("*.py"))
+    resp = read_json(await glob_tool("*.py"))
     assert resp["status"] == "ok"
     assert resp["count"] == 3
     got = {os.path.basename(f) for f in resp["files"]}
     assert got == {"hello.py", "main.py", "x.py"}
 
 
-def test_glob_star_matches_all_root_entries(tree):
+@pytest.mark.asyncio
+async def test_glob_star_matches_all_root_entries(tree):
     """基础匹配：*：验证单段 * 匹配根下全部条目。
 
     - 文件（含 .hidden.txt）与目录（a/b/sub）都匹配
     - .DS_Store、.venv、logs 被排除规则过滤
     """
-    resp = read_json(glob_tool("*"))
+    resp = read_json(await glob_tool("*"))
     assert resp["status"] == "ok"
     got = rels(tree, resp["files"])
     assert got == {
@@ -104,81 +106,88 @@ def test_glob_star_matches_all_root_entries(tree):
     assert resp["count"] == 9
 
 
-def test_glob_exact_path(tree):
+@pytest.mark.asyncio
+async def test_glob_exact_path(tree):
     """基础匹配：精确路径：验证多段精确模式命中单个文件。
 
     a/b.py 无通配符，应精确命中 a 目录下的 b.py。
     """
-    resp = read_json(glob_tool("a/b.py"))
+    resp = read_json(await glob_tool("a/b.py"))
     assert resp["status"] == "ok"
     assert resp["count"] == 1
     assert os.path.basename(resp["files"][0]) == "b.py"
 
 
-def test_glob_multi_segment(tree):
+@pytest.mark.asyncio
+async def test_glob_multi_segment(tree):
     """基础匹配：深层精确路径：验证跨多层精确模式。
 
     sub/nested/deep.py 三段路径逐层消费，应命中唯一文件。
     """
-    resp = read_json(glob_tool("sub/nested/deep.py"))
+    resp = read_json(await glob_tool("sub/nested/deep.py"))
     assert resp["status"] == "ok"
     assert resp["count"] == 1
     assert os.path.basename(resp["files"][0]) == "deep.py"
 
 
-def test_glob_dir_pattern(tree):
+@pytest.mark.asyncio
+async def test_glob_dir_pattern(tree):
     """基础匹配：目录匹配：验证无通配模式可匹配目录自身。
 
     pattern=a 无通配符，普通叶子分支记录匹配的目录条目。
     """
-    resp = read_json(glob_tool("a"))
+    resp = read_json(await glob_tool("a"))
     assert resp["status"] == "ok"
     assert resp["count"] == 1
     assert os.path.basename(resp["files"][0]) == "a"
 
 
-def test_question_mark_wildcard(tree):
+@pytest.mark.asyncio
+async def test_question_mark_wildcard(tree):
     """通配符：?：验证单字符通配。
 
     ?.py 匹配恰好一个字符的文件名，树中只有 x.py 满足。
     """
-    resp = read_json(glob_tool("?.py"))
+    resp = read_json(await glob_tool("?.py"))
     assert resp["status"] == "ok"
     assert [os.path.basename(f) for f in resp["files"]] == ["x.py"]
 
 
-def test_char_class_wildcard(tree):
+@pytest.mark.asyncio
+async def test_char_class_wildcard(tree):
     """通配符：[seq]：验证字符类通配。
 
     [hm]*.py 匹配 h 或 m 开头的 .py：hello.py 与 main.py。
     """
-    resp = read_json(glob_tool("[hm]*.py"))
+    resp = read_json(await glob_tool("[hm]*.py"))
     assert resp["status"] == "ok"
     assert [os.path.basename(f) for f in resp["files"]] == ["hello.py", "main.py"]
 
 
-def test_hidden_file_matched_by_star(tree):
+@pytest.mark.asyncio
+async def test_hidden_file_matched_by_star(tree):
     """通配符：隐藏文件：验证 fnmatch 语义下 * 匹配点开头文件。
 
     与标准 glob 不匹配隐藏文件不同，本实现基于 fnmatch，* 会匹配
     .hidden.txt（行为锁定）；.DS_Store 与 .venv 仍被排除规则过滤。
     """
-    resp = read_json(glob_tool("*"))
+    resp = read_json(await glob_tool("*"))
     got = {os.path.basename(f) for f in resp["files"]}
     assert ".hidden.txt" in got
 
-    resp = read_json(glob_tool(".*"))
+    resp = read_json(await glob_tool(".*"))
     assert [os.path.basename(f) for f in resp["files"]] == [".hidden.txt"]
 
 
-def test_double_star_all(tree):
+@pytest.mark.asyncio
+async def test_double_star_all(tree):
     """** 递归：裸 **：验证匹配全部文件与目录（含根自身）。
 
     - 根目录自身以 "." 形式出现在结果中
     - 每个目录恰好被记录一次，无重复
     - .venv/logs 及内部文件不可见
     """
-    resp = read_json(glob_tool("**"))
+    resp = read_json(await glob_tool("**"))
     assert resp["status"] == "ok"
     got = rels(tree, resp["files"])
     assert got == {
@@ -192,75 +201,81 @@ def test_double_star_all(tree):
     assert resp["truncated"] is False
 
 
-def test_double_star_py(tree):
+@pytest.mark.asyncio
+async def test_double_star_py(tree):
     """** 递归：**/*.py：验证跨任意层匹配所有 .py 文件。
 
     根下 hello.py/main.py/x.py 与深层 a/b.py、sub/nested/deep.py 全部命中。
     """
-    resp = read_json(glob_tool("**/*.py"))
+    resp = read_json(await glob_tool("**/*.py"))
     assert resp["status"] == "ok"
     got = rels(tree, resp["files"])
     assert got == {"hello.py", "main.py", "x.py", "a/b.py", "sub/nested/deep.py"}
     assert resp["count"] == 5
 
 
-def test_double_star_txt(tree):
+@pytest.mark.asyncio
+async def test_double_star_txt(tree):
     """** 递归：**/*.txt：验证跨层匹配并返回全部层级结果。
 
     根下 data.txt 与各子目录中的 txt 全部命中（含 note.txt）；
     .hidden.txt 也被 *.txt 命中（fnmatch 语义，见隐藏文件用例）。
     """
-    resp = read_json(glob_tool("**/*.txt"))
+    resp = read_json(await glob_tool("**/*.txt"))
     assert resp["status"] == "ok"
     got = rels(tree, resp["files"])
     assert got == {"data.txt", ".hidden.txt", "a/c/note.txt", "b/note.txt", "sub/data.txt"}
     assert resp["count"] == 5
 
 
-def test_double_star_note(tree):
+@pytest.mark.asyncio
+async def test_double_star_note(tree):
     """** 递归：**/note.txt：验证按文件名跨层定位。
 
     ** 跨任意层后匹配 note.txt，两个子目录中的同名文件都命中。
     """
-    resp = read_json(glob_tool("**/note.txt"))
+    resp = read_json(await glob_tool("**/note.txt"))
     assert resp["status"] == "ok"
     got = rels(tree, resp["files"])
     assert got == {"a/c/note.txt", "b/note.txt"}
     assert resp["count"] == 2
 
 
-def test_dir_double_star(tree):
+@pytest.mark.asyncio
+async def test_dir_double_star(tree):
     """** 递归：a/**：验证匹配目录自身与内部全部条目。
 
     - a 自身被记录（** 零层匹配）
     - a 下文件与子目录全部命中，共 4 个
     """
-    resp = read_json(glob_tool("a/**"))
+    resp = read_json(await glob_tool("a/**"))
     assert resp["status"] == "ok"
     got = rels(tree, resp["files"])
     assert got == {"a", "a/b.py", "a/c", "a/c/note.txt"}
     assert resp["count"] == 4
 
 
-def test_double_star_zero_level(tree):
+@pytest.mark.asyncio
+async def test_double_star_zero_level(tree):
     """** 递归：零层语义：验证 **/hello.py 中 ** 可视为不存在。
 
     ** 先尝试零层匹配（不消费任何目录），直接命中根下 hello.py。
     """
-    resp = read_json(glob_tool("**/hello.py"))
+    resp = read_json(await glob_tool("**/hello.py"))
     assert resp["status"] == "ok"
     got = rels(tree, resp["files"])
     assert got == {"hello.py"}
     assert resp["count"] == 1
 
 
-def test_excluded_dirs_not_returned(tree):
+@pytest.mark.asyncio
+async def test_excluded_dirs_not_returned(tree):
     """排除规则：排除目录：验证既不返回也不进入。
 
     .venv 与 logs 不出现在结果中，其内部文件（venv.py/app.log）
     也因不进入而不被扫描到。
     """
-    resp = read_json(glob_tool("**"))
+    resp = read_json(await glob_tool("**"))
     got = rels(tree, resp["files"])
     assert ".venv" not in got
     assert "logs" not in got
@@ -268,97 +283,106 @@ def test_excluded_dirs_not_returned(tree):
     assert "logs/app.log" not in got
 
 
-def test_excluded_files_filtered(tree):
+@pytest.mark.asyncio
+async def test_excluded_files_filtered(tree):
     """排除规则：排除文件：验证 .DS_Store 匹配到也被过滤。
 
     - * 与 ** 的结果中都不含 .DS_Store
     - .DS_* 模式匹配到 .DS_Store 但被过滤，返回空结果
     """
     for pattern in ("*", "**", "**/*"):
-        resp = read_json(glob_tool(pattern))
+        resp = read_json(await glob_tool(pattern))
         assert all(".DS_Store" not in os.path.basename(f) for f in resp["files"])
 
-    resp = read_json(glob_tool(".DS_*"))
+    resp = read_json(await glob_tool(".DS_*"))
     assert resp["status"] == "ok"
     assert resp["files"] == []
 
 
-def test_dir_path_into_excluded_dir(tree):
+@pytest.mark.asyncio
+async def test_dir_path_into_excluded_dir(tree):
     """排除规则：排除目录直指：验证 dir_path 指向其内部可正常搜索。
 
     docstring Notes：排除目录既不返回也不进入，但将 dir_path 直接
     指向该目录即可搜索其内部。
     """
-    resp = read_json(glob_tool("*.py", dir_path=".venv"))
+    resp = read_json(await glob_tool("*.py", dir_path=".venv"))
     assert resp["status"] == "ok"
     assert [os.path.basename(f) for f in resp["files"]] == ["venv.py"]
 
 
-def test_dir_path_subdir(tree):
+@pytest.mark.asyncio
+async def test_dir_path_subdir(tree):
     """dir_path：子目录：验证只搜索指定子目录。
 
     dir_path=a 时 *.py 只匹配 a 下的 b.py，根下文件不出现。
     """
-    resp = read_json(glob_tool("*.py", dir_path="a"))
+    resp = read_json(await glob_tool("*.py", dir_path="a"))
     assert resp["status"] == "ok"
     got = rels(tree, resp["files"])
     assert got == {"a/b.py"}
     assert resp["count"] == 1
 
 
-def test_dir_path_absolute_inside(tree):
+@pytest.mark.asyncio
+async def test_dir_path_absolute_inside(tree):
     """dir_path：绝对路径：验证工作区内绝对路径与相对路径等价。
 
     isabs 分支直接 realpath 后做前缀检查，工作区内绝对路径应放行。
     """
     abs_ws = os.path.realpath(str(tree))
-    resp = read_json(glob_tool("*.py", dir_path=abs_ws))
+    resp = read_json(await glob_tool("*.py", dir_path=abs_ws))
     assert resp["status"] == "ok"
     assert resp["count"] == 3
 
 
-def test_dir_path_outside_denied(tree):
+@pytest.mark.asyncio
+async def test_dir_path_outside_denied(tree):
     """dir_path：越界：验证 ../ 跳出工作区被拦截。
 
     ../outside 与工作区拼接并经 realpath 归一化后落在工作区外，
     前缀检查按目录边界匹配拒绝访问。
     """
-    resp = read_json(glob_tool("*.py", dir_path="../outside"))
+    resp = read_json(await glob_tool("*.py", dir_path="../outside"))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
 
-def test_dir_path_absolute_outside_denied(tree):
+@pytest.mark.asyncio
+async def test_dir_path_absolute_outside_denied(tree):
     """dir_path：系统路径：验证 /etc 等绝对路径被拦截。
 
     前缀检查先于目录存在性检查：即使 /etc 真实存在，越界即拒绝。
     """
-    resp = read_json(glob_tool("*.py", dir_path="/etc"))
+    resp = read_json(await glob_tool("*.py", dir_path="/etc"))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
 
-def test_dir_path_not_directory(tree):
+@pytest.mark.asyncio
+async def test_dir_path_not_directory(tree):
     """dir_path：非目录：验证指向文件时拒绝。
 
     dir_path 指向 hello.py（文件），isdir 检查拒绝。
     """
-    resp = read_json(glob_tool("*", dir_path="hello.py"))
+    resp = read_json(await glob_tool("*", dir_path="hello.py"))
     assert resp["status"] == "error"
     assert "is not a directory" in resp["message"]
 
 
-def test_dir_path_missing(tree):
+@pytest.mark.asyncio
+async def test_dir_path_missing(tree):
     """dir_path：不存在：验证指向不存在路径时拒绝。
 
     工作区内不存在的目录，isdir 检查返回 False，同样报不是目录。
     """
-    resp = read_json(glob_tool("*", dir_path="nope"))
+    resp = read_json(await glob_tool("*", dir_path="nope"))
     assert resp["status"] == "error"
     assert "is not a directory" in resp["message"]
 
 
-def test_allow_external_reads(workspace):
+@pytest.mark.asyncio
+async def test_allow_external_reads(workspace):
     """dir_path：外部放行：验证 allow_external_reads 开关生效。
 
     目录建在工作区外：
@@ -369,16 +393,17 @@ def test_allow_external_reads(workspace):
     outside.mkdir()
     (outside / "out.py").write_text("print('out')\n", encoding="utf-8")
 
-    resp = read_json(glob_tool("*.py", dir_path=str(outside)))
+    resp = read_json(await glob_tool("*.py", dir_path=str(outside)))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
-    resp = read_json(glob_tool("*.py", dir_path=str(outside), allow_external_reads=True))
+    resp = read_json(await glob_tool("*.py", dir_path=str(outside), allow_external_reads=True))
     assert resp["status"] == "ok"
     assert [os.path.basename(f) for f in resp["files"]] == ["out.py"]
 
 
-def test_symlink_dir_not_entered(tree):
+@pytest.mark.asyncio
+async def test_symlink_dir_not_entered(tree):
     """路径安全：符号链接目录：验证不跟随进入（防逃逸）。
 
     - 指向工作区外的目录符号链接，**/*.py 不暴露其内部文件
@@ -389,16 +414,17 @@ def test_symlink_dir_not_entered(tree):
     (outside / "secret.py").write_text("print('secret')\n", encoding="utf-8")
     os.symlink(str(outside), str(tree / "link"), target_is_directory=True)
 
-    resp = read_json(glob_tool("**/*.py"))
+    resp = read_json(await glob_tool("**/*.py"))
     assert all("secret" not in f for f in resp["files"])
     assert all("link/" not in f for f in resp["files"])
 
-    resp = read_json(glob_tool("**"))
+    resp = read_json(await glob_tool("**"))
     got = {os.path.basename(f) for f in resp["files"]}
     assert "link" in got
 
 
-def test_result_cap_truncated(tree, monkeypatch):
+@pytest.mark.asyncio
+async def test_result_cap_truncated(tree, monkeypatch):
     """上限截断：结果上限：验证 files 截断且 count 保留总数。
 
     将 GLOB_MAX_RESULTS 压到 20，造 30 个匹配文件：
@@ -409,7 +435,7 @@ def test_result_cap_truncated(tree, monkeypatch):
     for i in range(30):
         (tree / f"f{i:02d}.txt").write_text("x\n", encoding="utf-8")
 
-    resp = read_json(glob_tool("f*.txt"))
+    resp = read_json(await glob_tool("f*.txt"))
     assert resp["status"] == "ok"
     assert len(resp["files"]) == 20
     assert resp["count"] == 30
@@ -417,7 +443,8 @@ def test_result_cap_truncated(tree, monkeypatch):
     assert "(truncated)" in resp["message"]
 
 
-def test_scan_cap_truncated(tree, monkeypatch):
+@pytest.mark.asyncio
+async def test_scan_cap_truncated(tree, monkeypatch):
     """上限截断：扫描熔断：验证 total 达 GLOB_MAX_SCAN 停止扫描。
 
     将 GLOB_MAX_SCAN 压到 20，造 30 个匹配文件：
@@ -428,14 +455,15 @@ def test_scan_cap_truncated(tree, monkeypatch):
     for i in range(30):
         (tree / f"g{i:02d}.txt").write_text("x\n", encoding="utf-8")
 
-    resp = read_json(glob_tool("g*.txt"))
+    resp = read_json(await glob_tool("g*.txt"))
     assert resp["status"] == "ok"
     assert resp["count"] == 20
     assert len(resp["files"]) == 20
     assert resp["truncated"] is True
 
 
-def test_files_sorted(tree):
+@pytest.mark.asyncio
+async def test_files_sorted(tree):
     """结果形态：排序：验证 files 按路径字典序升序返回。
 
     乱序创建的文件，结果按名称排序（同前缀下相对路径排序
@@ -444,45 +472,48 @@ def test_files_sorted(tree):
     for name in ("zeta.py", "alpha.py", "mid.py"):
         (tree / name).write_text("print(1)\n", encoding="utf-8")
 
-    resp = read_json(glob_tool("*.py"))
+    resp = read_json(await glob_tool("*.py"))
     assert resp["status"] == "ok"
     assert [os.path.basename(f) for f in resp["files"]] == [
         "alpha.py", "hello.py", "main.py", "mid.py", "x.py", "zeta.py",
     ]
 
 
-def test_absolute_paths_returned(tree):
+@pytest.mark.asyncio
+async def test_absolute_paths_returned(tree):
     """结果形态：绝对路径：验证返回路径均为工作区内绝对路径。
 
     _glob_walk 的 root 从 search_dir（realpath 归一化）出发，
     所有结果应为工作区真实路径前缀下的绝对路径。
     """
-    resp = read_json(glob_tool("*.py"))
+    resp = read_json(await glob_tool("*.py"))
     assert resp["status"] == "ok"
     abs_ws = os.path.realpath(str(tree))
     assert all(f.startswith(abs_ws) for f in resp["files"])
 
 
-def test_empty_result(tree):
+@pytest.mark.asyncio
+async def test_empty_result(tree):
     """结果形态：空结果：验证无匹配时的契约。
 
     - count=0、files=[]、truncated=False
     - status=ok（无匹配不是错误）
     """
-    resp = read_json(glob_tool("*.xyz"))
+    resp = read_json(await glob_tool("*.xyz"))
     assert resp["status"] == "ok"
     assert resp["count"] == 0
     assert resp["files"] == []
     assert resp["truncated"] is False
 
 
-def test_message_summary(tree):
+@pytest.mark.asyncio
+async def test_message_summary(tree):
     """结果形态：message：验证汇总匹配数量。
 
     树中根下 *.py 共 3 个，message 精确格式为
     "Found 3 files matching '*.py'"。
     """
-    resp = read_json(glob_tool("*.py"))
+    resp = read_json(await glob_tool("*.py"))
     assert resp["status"] == "ok"
     assert resp["message"] == "Found 3 files matching '*.py'"
 
@@ -498,23 +529,25 @@ def test_message_summary(tree):
         ("a/../b", ".."),
     ],
 )
-def test_invalid_patterns(tree, pattern, expect):
+@pytest.mark.asyncio
+async def test_invalid_patterns(tree, pattern, expect):
     """参数校验：模式：验证非法模式被拒绝并提示对应原因。
 
     6 组参数化用例：空/空白/绝对路径/仅斜杠/.. 穿越（前缀与中间），
     每组断言 error 且 message 包含对应文案片段。
     """
-    resp = read_json(glob_tool(pattern))
+    resp = read_json(await glob_tool(pattern))
     assert resp["status"] == "error"
     assert expect in resp["message"]
 
 
 @pytest.mark.parametrize("dir_path", ["", "   "])
-def test_invalid_dir_path(tree, dir_path):
+@pytest.mark.asyncio
+async def test_invalid_dir_path(tree, dir_path):
     """参数校验：dir_path：验证空/空白目录被拒绝。
 
     2 组参数化用例，断言 error 且 message 指明 dir_path。
     """
-    resp = read_json(glob_tool("*.py", dir_path=dir_path))
+    resp = read_json(await glob_tool("*.py", dir_path=dir_path))
     assert resp["status"] == "error"
     assert "dir_path must not be empty" in resp["message"]

@@ -85,7 +85,8 @@ from core.tools._kernel.constants import MAX_READ_SIZE
 from tests.helpers import make_file, make_indexed_file, read_json
 
 
-def test_read_first_page(workspace):
+@pytest.mark.asyncio
+async def test_read_first_page(workspace):
     """常规读取：验证默认参数下读取文件前 100 行。
 
     150 行小文件（约 3KB），offset=1、limit=100 时：
@@ -93,7 +94,7 @@ def test_read_first_page(workspace):
     - 文件未到末尾且远小于 1MB 截断线：has_more=True、truncated=False
     """
     path = make_file(workspace, "page.txt", 150)
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 100
     assert resp["start_line"] == 1
@@ -104,7 +105,8 @@ def test_read_first_page(workspace):
     assert resp["lines"][-1]["line_no"] == 100
 
 
-def test_read_with_offset(workspace):
+@pytest.mark.asyncio
+async def test_read_with_offset(workspace):
     """常规读取：offset 跳转：验证从指定行开始读取。
 
     150 行小文件，offset=101、limit=10 时：
@@ -112,7 +114,7 @@ def test_read_with_offset(workspace):
     - 文件还有 40 行未读：has_more=True
     """
     path = make_file(workspace, "deep.txt", 150)
-    resp = read_json(view_file(str(path), offset=101, limit=10))
+    resp = read_json(await view_file(str(path), offset=101, limit=10))
     assert resp["status"] == "ok"
     assert resp["start_line"] == 101
     assert resp["end_line"] == 110
@@ -120,7 +122,8 @@ def test_read_with_offset(workspace):
     assert resp["has_more"] is True
 
 
-def test_has_more_false_at_exact_end(workspace):
+@pytest.mark.asyncio
+async def test_has_more_false_at_exact_end(workspace):
     """常规读取：恰好读完：验证文件正好结束时 has_more=False。
 
     100 行文件，offset=1、limit=100 恰好读满：
@@ -128,13 +131,14 @@ def test_has_more_false_at_exact_end(workspace):
     - has_more=False，不会误报"还有内容"
     """
     path = make_file(workspace, "exact.txt", 100)
-    resp = read_json(view_file(str(path), offset=1, limit=100))
+    resp = read_json(await view_file(str(path), offset=1, limit=100))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 100
     assert resp["has_more"] is False
 
 
-def test_file_shorter_than_limit(workspace):
+@pytest.mark.asyncio
+async def test_file_shorter_than_limit(workspace):
     """常规读取：文件不足 limit：验证读完全部行后自然结束。
 
     5 行小文件，默认 limit=100 时：
@@ -142,14 +146,15 @@ def test_file_shorter_than_limit(workspace):
     - has_more=False，不会误报"还有内容"
     """
     path = make_file(workspace, "short.txt", 5)
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 5
     assert resp["end_line"] == 5
     assert resp["has_more"] is False
 
 
-def test_read_from_subdir(workspace):
+@pytest.mark.asyncio
+async def test_read_from_subdir(workspace):
     """常规读取：子目录：验证可读取工作区子目录中的文件。
 
     view_file 的前缀检查按目录边界匹配（safe_root 以分隔符结尾），
@@ -157,7 +162,7 @@ def test_read_from_subdir(workspace):
     - 10 行文件建在 workspace/logs/ 下，读取应正常返回全部行
     """
     path = make_file(workspace, "nested.txt", 10, subdir="logs")
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 10
     assert resp["start_line"] == 1
@@ -165,7 +170,8 @@ def test_read_from_subdir(workspace):
     assert resp["has_more"] is False
 
 
-def test_relative_path_with_dot_prefix(workspace):
+@pytest.mark.asyncio
+async def test_relative_path_with_dot_prefix(workspace):
     """常规读取：./ 前缀：验证 ./ 前缀相对路径与普通相对路径等价。
 
     realpath 会将 ./ 归一化，两种写法应解析到同一路径：
@@ -173,8 +179,8 @@ def test_relative_path_with_dot_prefix(workspace):
     - status=ok，且返回的 path 无 ./ 残留（已归一化为绝对路径）
     """
     make_file(workspace, "hello.py", 3, subdir="python")
-    resp_dot = read_json(view_file("./python/hello.py"))
-    resp_plain = read_json(view_file("python/hello.py"))
+    resp_dot = read_json(await view_file("./python/hello.py"))
+    resp_plain = read_json(await view_file("python/hello.py"))
     assert resp_dot["status"] == "ok"
     assert resp_plain["status"] == "ok"
     assert resp_dot["path"] == resp_plain["path"]
@@ -182,7 +188,8 @@ def test_relative_path_with_dot_prefix(workspace):
     assert resp_dot["lines"] == resp_plain["lines"]
 
 
-def test_read_absolute_path(workspace):
+@pytest.mark.asyncio
+async def test_read_absolute_path(workspace):
     """常规读取：绝对路径：验证工作区内绝对路径可直接读取。
 
     make_file 返回的 path 本身即为工作区内的绝对路径，直接传入：
@@ -190,13 +197,14 @@ def test_read_absolute_path(workspace):
     - 应正常读取全部行，且返回的 path 与归一化后的传入路径一致
     """
     path = make_file(workspace, "abs.txt", 5)
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 5
     assert resp["path"] == os.path.realpath(str(path))
 
 
-def test_allow_external_reads(workspace):
+@pytest.mark.asyncio
+async def test_allow_external_reads(workspace):
     """边界场景：allow_external_reads：验证外部文件读取开关生效。
 
     文件建在工作区外（tmp_path 的兄弟目录）：
@@ -206,17 +214,18 @@ def test_allow_external_reads(workspace):
     outside = workspace.parent / "outside.txt"
     outside.write_text("secret\n", encoding="utf-8")
 
-    resp = read_json(view_file(str(outside)))
+    resp = read_json(await view_file(str(outside)))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
-    resp = read_json(view_file(str(outside), allow_external_reads=True))
+    resp = read_json(await view_file(str(outside), allow_external_reads=True))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 1
     assert resp["lines"][0]["content"] == "secret"
 
 
-def test_read_last_line(workspace):
+@pytest.mark.asyncio
+async def test_read_last_line(workspace):
     """常规读取：末行：验证 offset 指向最后一行时只返回一行。
 
     150 行文件，offset=150、limit=10 时：
@@ -224,7 +233,7 @@ def test_read_last_line(workspace):
     - 只返回 1 行：start_line=end_line=150，has_more=False
     """
     path = make_file(workspace, "tail.txt", 150)
-    resp = read_json(view_file(str(path), offset=150, limit=10))
+    resp = read_json(await view_file(str(path), offset=150, limit=10))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 1
     assert resp["start_line"] == 150
@@ -232,7 +241,8 @@ def test_read_last_line(workspace):
     assert resp["has_more"] is False
 
 
-def test_line_content_matches_index(workspace):
+@pytest.mark.asyncio
+async def test_line_content_matches_index(workspace):
     """常规读取：内容校验：验证行号与内容一一对应。
 
     索引文件第 i 行内容为 line-{i}，offset=3、limit=4 时：
@@ -240,7 +250,7 @@ def test_line_content_matches_index(workspace):
     - 行号张冠李戴类 bug 在此数据下必然暴露（同质内容文件测不出）
     """
     path = make_indexed_file(workspace, "indexed.txt", 10)
-    resp = read_json(view_file(str(path), offset=3, limit=4))
+    resp = read_json(await view_file(str(path), offset=3, limit=4))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 4
     for i, item in enumerate(resp["lines"]):
@@ -248,7 +258,8 @@ def test_line_content_matches_index(workspace):
         assert item["content"] == f"line-{3 + i}"
 
 
-def test_last_line_without_newline(workspace):
+@pytest.mark.asyncio
+async def test_last_line_without_newline(workspace):
     """常规读取：无换行符末行：验证最后一行缺 \n 也能正常读取。
 
     真实文件最后一行常无换行符（脚本、编辑器产物）：
@@ -257,7 +268,7 @@ def test_last_line_without_newline(workspace):
     """
     path = workspace / "noeol.txt"
     path.write_text("line1\nline2\nline3", encoding="utf-8")
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 3
     assert resp["end_line"] == 3
@@ -265,26 +276,28 @@ def test_last_line_without_newline(workspace):
     assert "\n" not in resp["lines"][2]["content"]
 
 
-def test_limit_extremes(workspace):
+@pytest.mark.asyncio
+async def test_limit_extremes(workspace):
     """常规读取：limit 极值：验证 limit 上下限可正常读取。
 
     - limit=1：150 行文件只返回 1 行，has_more=True（最小步长，逐行续读）
     - limit=1000：5 行文件一次读完，has_more=False（上限放行且读取正常）
     """
     path = make_file(workspace, "limit_min.txt", 150)
-    resp = read_json(view_file(str(path), limit=1))
+    resp = read_json(await view_file(str(path), limit=1))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 1
     assert resp["has_more"] is True
 
     path = make_file(workspace, "limit_max.txt", 5)
-    resp = read_json(view_file(str(path), limit=1000))
+    resp = read_json(await view_file(str(path), limit=1000))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 5
     assert resp["has_more"] is False
 
 
-def test_read_gbk_encoding(workspace):
+@pytest.mark.asyncio
+async def test_read_gbk_encoding(workspace):
     """常规读取：gbk 编码：验证非 utf-8 文件指定编码后可正常读取。
 
     中文内容以 gbk 编码写入，传入 encoding="gbk"：
@@ -292,14 +305,15 @@ def test_read_gbk_encoding(workspace):
     """
     path = workspace / "gbk.txt"
     path.write_text("你好，世界\n第二行\n", encoding="gbk")
-    resp = read_json(view_file(str(path), encoding="gbk"))
+    resp = read_json(await view_file(str(path), encoding="gbk"))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 2
     assert resp["lines"][0]["content"] == "你好，世界"
     assert resp["lines"][1]["content"] == "第二行"
 
 
-def test_decode_error_returns_friendly_message(workspace):
+@pytest.mark.asyncio
+async def test_decode_error_returns_friendly_message(workspace):
     """边界场景：编码不匹配：验证解码失败返回友好错误。
 
     gbk 文件未指定 encoding（默认 utf-8）时：
@@ -308,24 +322,26 @@ def test_decode_error_returns_friendly_message(workspace):
     """
     path = workspace / "gbk.txt"
     path.write_text("你好，世界\n", encoding="gbk")
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "error"
     assert "cannot be decoded as utf-8" in resp["message"]
 
 
-def test_directory_path_rejected(workspace):
+@pytest.mark.asyncio
+async def test_directory_path_rejected(workspace):
     """边界场景：目录路径：验证传入目录时被拒绝。
 
     view_file 只读文件，目录应在文件类型检查处被拦截：
     - 返回 error，提示是目录，不进入读取逻辑
     """
     (workspace / "adir").mkdir()
-    resp = read_json(view_file(str(workspace / "adir")))
+    resp = read_json(await view_file(str(workspace / "adir")))
     assert resp["status"] == "error"
     assert "is a directory" in resp["message"]
 
 
-def test_relative_path_traversal_denied(workspace):
+@pytest.mark.asyncio
+async def test_relative_path_traversal_denied(workspace):
     """边界场景：相对穿越：验证 ../ 跳出工作区被拦截。
 
     "../outside.txt" 与工作区拼接并经 realpath 归一化后落在工作区外：
@@ -333,23 +349,25 @@ def test_relative_path_traversal_denied(workspace):
     """
     outside = workspace.parent / "outside.txt"
     outside.write_text("secret\n", encoding="utf-8")
-    resp = read_json(view_file("../outside.txt"))
+    resp = read_json(await view_file("../outside.txt"))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
 
-def test_system_path_denied(workspace):
+@pytest.mark.asyncio
+async def test_system_path_denied(workspace):
     """边界场景：系统路径：验证 /etc/passwd 等绝对路径被拦截。
 
     前缀检查先于文件存在性检查：
     - 即使文件真实存在（/etc/passwd），越界即拒绝，不泄露任何信息
     """
-    resp = read_json(view_file("/etc/passwd"))
+    resp = read_json(await view_file("/etc/passwd"))
     assert resp["status"] == "error"
     assert "denied" in resp["message"]
 
 
-def test_binary_file_rejected(workspace):
+@pytest.mark.asyncio
+async def test_binary_file_rejected(workspace):
     """边界场景：二进制文件：验证二进制魔数在解码前被嗅探拦截。
 
     PNG 魔数 \x89PNG 头部含 NUL 字节：
@@ -358,12 +376,13 @@ def test_binary_file_rejected(workspace):
     """
     path = workspace / "img.png"
     path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "error"
     assert "binary" in resp["message"]
 
 
-def test_nul_containing_file_rejected(workspace):
+@pytest.mark.asyncio
+async def test_nul_containing_file_rejected(workspace):
     """边界场景：NUL 嗅探：验证含 NUL 的合法 UTF-8 文件被拦截。
 
     此前盲区：\x00 是合法 UTF-8 码点，含 NUL 文件不会触发解码错误，
@@ -372,12 +391,13 @@ def test_nul_containing_file_rejected(workspace):
     """
     path = workspace / "nul.txt"
     path.write_bytes(b"abc\x00def\nxyz\n")
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "error"
     assert "binary" in resp["message"]
 
 
-def test_utf16_encoding(workspace):
+@pytest.mark.asyncio
+async def test_utf16_encoding(workspace):
     """常规读取：utf-16 编码：验证含 NUL 的文本编码不被误杀。
 
     UTF-16 文本的 ASCII 字符天然带 \x00，嗅探白名单应放行：
@@ -385,13 +405,14 @@ def test_utf16_encoding(workspace):
     """
     path = workspace / "utf16.txt"
     path.write_text("你好\n世界\n", encoding="utf-16")
-    resp = read_json(view_file(str(path), encoding="utf-16"))
+    resp = read_json(await view_file(str(path), encoding="utf-16"))
     assert resp["status"] == "ok"
     assert resp["lines"][0]["content"] == "你好"
     assert resp["lines"][1]["content"] == "世界"
 
 
-def test_single_line_file(workspace):
+@pytest.mark.asyncio
+async def test_single_line_file(workspace):
     """常规读取：单行文件：验证仅一行的文件可正常读取。
 
     单行是常见文件形态（README、.env 等）：
@@ -400,7 +421,7 @@ def test_single_line_file(workspace):
     """
     path = workspace / "single.txt"
     path.write_text("only one line\n", encoding="utf-8")
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 1
     assert resp["start_line"] == 1
@@ -409,7 +430,8 @@ def test_single_line_file(workspace):
     assert resp["has_more"] is False
 
 
-def test_trailing_empty_line(workspace):
+@pytest.mark.asyncio
+async def test_trailing_empty_line(workspace):
     """常规读取：末尾空行：验证文件末尾的空行算作一行。
 
     readline 返回 "" 才是 EOF，返回 "\n" 是空行：
@@ -418,7 +440,7 @@ def test_trailing_empty_line(workspace):
     """
     path = workspace / "trail.txt"
     path.write_text("line1\nline2\n\n", encoding="utf-8")
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 3
     assert resp["end_line"] == 3
@@ -426,7 +448,8 @@ def test_trailing_empty_line(workspace):
     assert resp["has_more"] is False
 
 
-def test_paged_read_restores_content(workspace):
+@pytest.mark.asyncio
+async def test_paged_read_restores_content(workspace):
     """完整性：分段续读：拼接还原应等于原始文件内容。
 
     round-trip 还原：写入 → 分段读出 → 拼接，必须逐字节等于原文：
@@ -439,7 +462,7 @@ def test_paged_read_restores_content(workspace):
     parts = []
     offset, limit = 1, 50
     while True:
-        resp = read_json(view_file(str(path), offset=offset, limit=limit))
+        resp = read_json(await view_file(str(path), offset=offset, limit=limit))
         assert resp["status"] == "ok"
         parts.extend(item["content"] for item in resp["lines"])
         if not resp["has_more"]:
@@ -450,7 +473,8 @@ def test_paged_read_restores_content(workspace):
     assert rebuilt == original
 
 
-def test_truncated_sets_has_more(workspace):
+@pytest.mark.asyncio
+async def test_truncated_sets_has_more(workspace):
     """边界场景：1MB 截断：验证截断时 has_more 恒为 True。
 
     每行 5KB、2000 行约 10MB 的文件，limit=1000 时在 1MB 处命中截断：
@@ -459,7 +483,7 @@ def test_truncated_sets_has_more(workspace):
     - message 提示可用 offset=end_line+1 续读
     """
     path = make_file(workspace, "huge.txt", 2000, line_len=5120)
-    resp = read_json(view_file(str(path), offset=1, limit=1000))
+    resp = read_json(await view_file(str(path), offset=1, limit=1000))
     assert resp["status"] == "ok"
     assert resp["truncated"] is True
     assert resp["has_more"] is True
@@ -467,7 +491,8 @@ def test_truncated_sets_has_more(workspace):
     assert "Use offset=" in resp["message"]
 
 
-def test_first_line_exceeds_max_read_size(workspace):
+@pytest.mark.asyncio
+async def test_first_line_exceeds_max_read_size(workspace):
     """边界场景：超长行（首行）：验证首行超 1MB 时返回空结果并标记续读。
 
     第一行 > 1MB 时无法返回任何行，但必须标记 truncated + has_more：
@@ -479,7 +504,7 @@ def test_first_line_exceeds_max_read_size(workspace):
     with open(path, "w", encoding="utf-8") as f:
         f.write("x" * (MAX_READ_SIZE + 500 * 1024) + "\n")
         f.write("y" * 10 + "\n")
-    resp = read_json(view_file(str(path), offset=1, limit=100))
+    resp = read_json(await view_file(str(path), offset=1, limit=100))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 0
     assert resp["truncated"] is True
@@ -488,7 +513,8 @@ def test_first_line_exceeds_max_read_size(workspace):
     assert "offset=2" in resp["message"]
 
 
-def test_oversized_line_can_be_skipped(workspace):
+@pytest.mark.asyncio
+async def test_oversized_line_can_be_skipped(workspace):
     """边界场景：超长行（中部）：验证超长行可被 offset+1 跳过。
 
     超长行位于中间时：指向它返回空结果 + truncated + has_more + 提示；
@@ -501,19 +527,20 @@ def test_oversized_line_can_be_skipped(workspace):
         f.write("first\n")
         f.write("x" * (MAX_READ_SIZE + 500 * 1024) + "\n")
         f.write("last\n")
-    resp = read_json(view_file(str(path), offset=1, limit=10))
+    resp = read_json(await view_file(str(path), offset=1, limit=10))
     assert resp["status"] == "ok"
     assert resp["lines"][0]["content"] == "first"
-    resp = read_json(view_file(str(path), offset=2, limit=10))
+    resp = read_json(await view_file(str(path), offset=2, limit=10))
     assert resp["read_lines"] == 0
     assert resp["truncated"] is True
     assert resp["has_more"] is True
-    resp = read_json(view_file(str(path), offset=3, limit=10))
+    resp = read_json(await view_file(str(path), offset=3, limit=10))
     assert resp["status"] == "ok"
     assert resp["lines"][0]["content"] == "last"
 
 
-def test_paged_read_completes_large_file(workspace):
+@pytest.mark.asyncio
+async def test_paged_read_completes_large_file(workspace):
     """大文件：分段续读：验证大文件可完整读完且无遗漏。
 
     约 2.6MB 文件（26000 行 × 101 字节）：
@@ -527,7 +554,7 @@ def test_paged_read_completes_large_file(workspace):
     offset = 1
     limit = 200
     while True:
-        resp = read_json(view_file(str(path), offset=offset, limit=limit))
+        resp = read_json(await view_file(str(path), offset=offset, limit=limit))
         assert resp["status"] == "ok"
         assert resp["start_line"] == offset
         seen.extend(line["line_no"] for line in resp["lines"])
@@ -537,7 +564,8 @@ def test_paged_read_completes_large_file(workspace):
     assert seen == list(range(1, total + 1))
 
 
-def test_paged_read_resume_from_mid_file(workspace):
+@pytest.mark.asyncio
+async def test_paged_read_resume_from_mid_file(workspace):
     """大文件：中部续读：验证从 1MB 之后的深处开始分段续读。
 
     约 2.6MB 文件，从第 15000 行（>1MB 位置）开始：
@@ -551,7 +579,7 @@ def test_paged_read_resume_from_mid_file(workspace):
     offset = start
     limit = 300
     while True:
-        resp = read_json(view_file(str(path), offset=offset, limit=limit))
+        resp = read_json(await view_file(str(path), offset=offset, limit=limit))
         assert resp["status"] == "ok"
         seen.extend(line["line_no"] for line in resp["lines"])
         if not resp["has_more"]:
@@ -560,7 +588,8 @@ def test_paged_read_resume_from_mid_file(workspace):
     assert seen == list(range(start, total + 1))
 
 
-def test_skip_budget_soft_limit(workspace, monkeypatch):
+@pytest.mark.asyncio
+async def test_skip_budget_soft_limit(workspace, monkeypatch):
     """边界场景：跳过软限制：验证超限仅提示、不拒读。
 
     将 VIEW_FILE_MAX_SKIP_BYTES 压到 16 字节，读取 offset=50 必然超限：
@@ -569,14 +598,15 @@ def test_skip_budget_soft_limit(workspace, monkeypatch):
     """
     monkeypatch.setattr(_fs_readonly, "VIEW_FILE_MAX_SKIP_BYTES", 16)
     path = make_file(workspace, "soft.txt", 100)
-    resp = read_json(view_file(str(path), offset=50, limit=5))
+    resp = read_json(await view_file(str(path), offset=50, limit=5))
     assert resp["status"] == "ok"
     assert resp["start_line"] == 50
     assert resp["read_lines"] == 5
     assert "Skipped" in resp.get("message", "")
 
 
-def test_offset_exceeds_file(workspace):
+@pytest.mark.asyncio
+async def test_offset_exceeds_file(workspace):
     """边界场景：offset 越界：验证 offset 超过总行数时返回 error。
 
     5 行文件，offset=7（超出 2 行）：
@@ -584,12 +614,13 @@ def test_offset_exceeds_file(workspace):
     - message 提示 exceeds total lines 及文件实际行数
     """
     path = make_file(workspace, "small.txt", 5)
-    resp = read_json(view_file(str(path), offset=7))
+    resp = read_json(await view_file(str(path), offset=7))
     assert resp["status"] == "error"
     assert "exceeds total lines" in resp["message"]
 
 
-def test_offset_at_eof_position(workspace):
+@pytest.mark.asyncio
+async def test_offset_at_eof_position(workspace):
     """边界场景：EOF 位置：验证 offset 指向末尾下一行时返回空结果。
 
     5 行文件，offset=6（恰好是末尾下一行）：
@@ -598,7 +629,7 @@ def test_offset_at_eof_position(workspace):
     - 与 offset>total 的 error 形成三态边界（total / total+1 / 越界）
     """
     path = make_file(workspace, "small2.txt", 5)
-    resp = read_json(view_file(str(path), offset=6, limit=5))
+    resp = read_json(await view_file(str(path), offset=6, limit=5))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 0
     assert resp["start_line"] == 6
@@ -607,7 +638,8 @@ def test_offset_at_eof_position(workspace):
     assert resp["truncated"] is False
 
 
-def test_empty_file(workspace):
+@pytest.mark.asyncio
+async def test_empty_file(workspace):
     """边界场景：空文件：验证空文件返回空结果而非报错。
 
     0 行文件：
@@ -616,21 +648,22 @@ def test_empty_file(workspace):
     """
     path = workspace / "empty.txt"
     path.write_text("", encoding="utf-8")
-    resp = read_json(view_file(str(path)))
+    resp = read_json(await view_file(str(path)))
     assert resp["status"] == "ok"
     assert resp["read_lines"] == 0
     assert resp["has_more"] is False
     assert resp["truncated"] is False
 
 
-def test_missing_file(workspace):
+@pytest.mark.asyncio
+async def test_missing_file(workspace):
     """边界场景：文件不存在：验证不存在的路径返回友好错误。
 
     工作区内不存在的路径：
     - 通过越界检查后，在存在性检查处报 does not exist
     - 与目录/越界共同构成"三种打不开"的完整错误集
     """
-    resp = read_json(view_file(str(workspace / "nope.txt")))
+    resp = read_json(await view_file(str(workspace / "nope.txt")))
     assert resp["status"] == "error"
     assert "does not exist" in resp["message"]
 
@@ -645,13 +678,14 @@ def test_missing_file(workspace):
         ({"file_path": "x.txt", "offset": -5}, "offset"),
     ],
 )
-def test_invalid_params(workspace, kwargs, expect):
+@pytest.mark.asyncio
+async def test_invalid_params(workspace, kwargs, expect):
     """边界场景：参数校验：验证非法参数被拒绝并给出对应提示。
 
     5 组参数化用例：空 file_path / limit=0 / limit=1001 / offset=0 / offset=-5，
     每组断言 error 且 message 包含对应参数名。
     """
-    resp = read_json(view_file(**kwargs))
+    resp = read_json(await view_file(**kwargs))
     assert resp["status"] == "error"
     assert expect in resp["message"]
 
