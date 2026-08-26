@@ -319,7 +319,7 @@ def delete_plan(
     })
 
 
-ORCHESTRATOR_TOOLS = [
+ORCHESTRATOR_BASE_TOOLS = [
     view_file,
     glob_tool,
     grep_tool,
@@ -336,4 +336,10 @@ ORCHESTRATOR_TOOLS = [
     make_plan,
     edit_plan,
     delete_plan,
+]
+
+ORCHESTRATOR_HARD_STOP_TOOLS = [
+    end_orchestration, 
+    edit_plan, 
+    delete_plan
 ]

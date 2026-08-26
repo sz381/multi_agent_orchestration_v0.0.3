@@ -10,7 +10,7 @@ from langchain_core.runnables import RunnableConfig
 
 from core.agents.state import OrchestrationState
 from core.prompts.system_prompt_orchestrator import ORCHESTRATOR_SYSTEM_PROMPT
-from core.tools.bundles.orchestrator import ORCHESTRATOR_TOOLS
+from core.tools.bundles.orchestrator import ORCHESTRATOR_BASE_TOOLS, ORCHESTRATOR_HARD_STOP_TOOLS
 from core.tools.bundles.orchestrator import end_orchestration, edit_plan, delete_plan
 from core.agents.constants import (
     ORCHESTRATOR_MAX_ITERATIONS,
@@ -150,7 +150,7 @@ def make_orchestrator_node():
             agent_name="orchestrator",
             agent_id="orchestrator",
             iteration=state["orchestration_iteration"],
-            counter=state.get("active_sub_agent_count", "N/A"),
+            sub_agent_cnt_active=state.get("active_sub_agent_count", "N/A"),
         )
 
         # inject the workspace directory into the system prompt
@@ -194,14 +194,12 @@ def make_orchestrator_node():
             streaming=True,
         )
         if not _check_iteration_limit(state):
-            model = model.bind_tools(ORCHESTRATOR_TOOLS)
+            model = model.bind_tools(ORCHESTRATOR_BASE_TOOLS)
         else:
             # iteration limit reached: bind only end_orchestration, edit_plan, delete_plan
             # end_orchestration fails if a plan still exists, so the orchestrator
             # must edit or delete the plan before ending the orchestration
-            model = model.bind_tools(
-                [end_orchestration, edit_plan, delete_plan]
-            )
+            model = model.bind_tools(ORCHESTRATOR_HARD_STOP_TOOLS)
 
         # call the LLM
         try:

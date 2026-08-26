@@ -177,7 +177,7 @@ async def web_fetch(
     )
 
 
-REVIEWER_TOOLS = [
+REVIEWER_BASE_TOOLS = [
     view_file,
     glob_tool,
     grep_tool,

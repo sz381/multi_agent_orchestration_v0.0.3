@@ -229,7 +229,7 @@ def delete_plan(
     })
 
 
-RESEARCHER_TOOLS = [
+RESEARCHER_BASE_TOOLS = [
     view_file,
     glob_tool,
     grep_tool,

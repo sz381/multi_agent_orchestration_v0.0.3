@@ -253,7 +253,7 @@ def delete_plan(
     })
 
 
-PROGRAMMER_TOOLS = [
+PROGRAMMER_BASE_TOOLS = [
     view_file,
     glob_tool,
     grep_tool,

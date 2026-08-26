@@ -48,7 +48,7 @@ from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from utils.settings import settings
 from utils.logging import get_logger
 from core.agents.model import ainvoke_with_content_guard
-from core.prompts.web_page_summarizer import WEB_SUMMARIZE_TEMPLATE
+from core.prompts.system_prompt_webpage_summarizer import WEB_SUMMARIZE_TEMPLATE
 from core.tools._kernel.constants import (
     MAX_QUERY_LENGTH,
     MAX_SEARCH_RESULTS,
