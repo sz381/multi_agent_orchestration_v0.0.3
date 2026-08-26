@@ -1,19 +1,29 @@
 """
 temporary test file, will be deleted later
 """
+
+import json
 import asyncio
 import logging
+from venv import logger
 
 from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 
 from core.agents.graph import build_graph
 from core.tools._kernel._web import close_crawler
-from utils.logging import setup_logging
+from utils.logging import setup_logging, get_logger
+from utils.console import render_plan_block, render_fanout_block
 
 setup_logging(dev_mode=True, log_level=logging.DEBUG)
 
+logger = get_logger(__name__)
+
 TEST_QUERY = """
-查看当前工作区根目录下有哪些文件，然后用一句话告诉我。
+请测试计划类工具，按顺序尽情调用（删除后要保留至少一个阶段）：
+1. make_plan：创建一份 3 个阶段的执行计划，阶段内容自拟
+2. edit_plan：修改其中一个阶段的 phase_name 或 phase_status
+3. delete_plan：删除其中一个阶段
+每个工具调用后，用一句话说明结果。
 """
 
 def _safe_initial_state(**overrides) -> dict:
@@ -46,6 +56,22 @@ def _tool_summary(msg: ToolMessage) -> str | None:
     content = msg.content
     if not isinstance(content, str) or not content.strip():
         return None
+
+    payload = None
+    if content.lstrip().startswith("{"):
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+
+    if isinstance(payload, dict):
+        if msg.name in ("make_plan", "edit_plan", "delete_plan") and payload.get("plan"):
+            return render_plan_block(payload["plan"])
+        if msg.name == "fanout_subagents" and payload.get("tasks"):
+            return render_fanout_block(payload["tasks"])
+        if payload.get("message"):
+            return f"  ⚙ {msg.name or 'tool'} → {payload['message'][:120]}"
+
     first_line = content.strip().splitlines()[0]
     return f"  ⚙ {msg.name or 'tool'} → {first_line[:120]}"
 
