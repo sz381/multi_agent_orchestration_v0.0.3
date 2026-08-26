@@ -1,21 +1,19 @@
-"""pause_orchestration 全方面测试：布尔类型校验、状态闸门与响应契约。
+"""Comprehensive tests for pause_orchestration: boolean type validation, the state gate and the response contract.
 
-测试项目：
-- test_pause_orchestration_success:                      验证 True 时暂停成功与 message 精确断言
-- test_pause_orchestration_false_rejected:               验证状态闸门 False 拒绝暂停
-- test_pause_orchestration_type_invalid:                 参数化验证非 bool 各形态拒绝
-- test_pause_orchestration_bool_not_int_subclass:        验证 bool 精确匹配：1 拒绝而 True 通过
-- test_pause_orchestration_ok_response_contract:         验证 ok 响应仅 status/message 两字段
-- test_pause_orchestration_error_response_contract:      验证 error 响应仅 status/message 两字段
-- test_pause_orchestration_chinese_not_escaped:          验证 ensure_ascii=False 无 \\u 转义
+Test cases:
+- test_pause_orchestration_success:                       pausing with True succeeds with an exact message assertion
+- test_pause_orchestration_false_rejected:                the state gate False refuses to pause
+- test_pause_orchestration_type_invalid:                  parametrized: all non-bool forms rejected
+- test_pause_orchestration_bool_not_int_subclass:         exact bool matching: 1 rejected while True passes
+- test_pause_orchestration_ok_response_contract:          ok response has only status/message fields
+- test_pause_orchestration_error_response_contract:       error response has only status/message fields
+- test_pause_orchestration_chinese_not_escaped:           ensure_ascii=False emits no \\u escapes
 
-覆盖场景：
-- 参数校验：should_orch_pause 必须是 bool（字符串 "false" 是 truthy 会误放行；0/1 等 int 拒绝）
-- 状态闸门：False 时拒绝暂停，需先解除阻止状态
-- bool 精确匹配：bool 是 int 子类，1 与 True 必须区分对待
-- 响应契约：ok/error 均仅 status/message 两字段；无 \\u 转义
-
-测试用例数量：13
+Covered scenarios:
+- Parameter validation: should_orch_pause must be a bool (the string "false" is truthy and would wrongly pass; ints like 0/1 are rejected)
+- State gate: pausing is refused when False; the blocking state must be cleared first
+- Exact bool matching: bool is an int subclass, so 1 and True must be distinguished
+- Response contract: ok/error both have only status/message fields; no \\u escapes
 """
 
 import json
@@ -26,16 +24,11 @@ from core.tools._kernel._orch_control import pause_orchestration
 
 
 def test_pause_orchestration_success():
-    """验证 True 时暂停成功：返回 ok 且 message 精确匹配。"""
     result = json.loads(pause_orchestration(True))
     assert result == {"status": "ok", "message": "Orchestration paused."}
 
 
 def test_pause_orchestration_false_rejected():
-    """验证状态闸门 False 拒绝暂停。
-
-    should_orch_pause 为 False 时编排不允许暂停。
-    """
     result = json.loads(pause_orchestration(False))
     assert result["status"] == "error"
     assert "should_orch_pause is False" in result["message"]
@@ -43,40 +36,26 @@ def test_pause_orchestration_false_rejected():
 
 @pytest.mark.parametrize("should_orch_pause", [None, "false", "False", 0, 1, [], {}])
 def test_pause_orchestration_type_invalid(should_orch_pause):
-    """参数化验证 should_orch_pause 非 bool 各形态拒绝。
-
-    int/字符串/None 均拒绝；重点防字符串 "false" 是 truthy 会误放行。
-    """
     result = json.loads(pause_orchestration(should_orch_pause))
     assert result["status"] == "error"
     assert "must be a boolean" in result["message"]
 
 
 def test_pause_orchestration_bool_not_int_subclass():
-    """验证 bool 精确匹配：1 拒绝而 True 通过。
-
-    bool 是 int 的子类，若用数值判定会放行 1；必须 isinstance 精确到 bool。
-    """
     assert json.loads(pause_orchestration(1))["status"] == "error"
     assert json.loads(pause_orchestration(True))["status"] == "ok"
 
 
 def test_pause_orchestration_ok_response_contract():
-    """验证 ok 响应仅 status/message 两字段。
-
-    字段集合必须精确等于两字段，防止未来新增字段破坏契约。
-    """
     result = json.loads(pause_orchestration(True))
     assert set(result.keys()) == {"status", "message"}
 
 
 def test_pause_orchestration_error_response_contract():
-    """验证 error 响应仅 status/message 两字段。"""
     result = json.loads(pause_orchestration(False))
     assert set(result.keys()) == {"status", "message"}
 
 
 def test_pause_orchestration_chinese_not_escaped():
-    """验证 ensure_ascii=False：原始响应字符串无 \\u 转义。"""
     raw = pause_orchestration(True)
     assert "\\u" not in raw

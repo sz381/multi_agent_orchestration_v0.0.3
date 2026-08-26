@@ -1,35 +1,45 @@
-"""Agent 系统命令行工具实现
+"""Agent system shell command tooling.
 
-⚠️ 本模块仅支持 macOS（sandbox-exec + Seatbelt 沙箱）
+⚠️ macOS only (sandbox-exec + Seatbelt sandbox).
 
-提供函数：
-- bash:                     执行 bash 命令
-- kill_specific_process:    杀死特定进程
+Functions:
+- bash:                     execute a bash command
+- kill_specific_process:    kill a specific process
 
-关键约束：
-- 统一返回 JSON 字符串（status: ok/error），执行异常被兜底捕获不抛出
-- 参数类型安全：allow_network 必须为 bool（字符串 "false" 是 truthy，会误放行网络）；
-  timeout 必须为 int/float 且 > 0（bool 是 int 子类需显式排除）；cmd/cwd 必须为字符串
-- 黑名单校验先行：命中 BLACKLIST_PATTERNS 正则集合的命令拒绝执行
-  （Seatbelt 沙箱为第一道防线，黑名单为纵深防御）
-- cwd 必须是工作区子目录（路径边界归一化防前缀匹配陷阱）；
-  工作区未配置时立即报错（配置错误不返回 error JSON）
-- 输出截断：stdout/stderr 单路最多返回 BASH_MAX_OUTPUT_CHARS 字符
-- kill_specific_process 为 bash 沙箱的安全出口：Seatbelt 规则仅允许
-  (allow signal (target self))，bash 无法杀其他进程；该工具在沙箱外
-  直接操作，仅允许 KILL_ALLOWED_PORTS 白名单端口，拒绝 agent 自身/
-  PID 1/系统进程，kill 前二次校验防 PID 复用（TOCTOU）
-- kill_specific_process 信号策略：SIGTERM 优雅终止，KILL_GRACE_SECONDS
-  秒未退出自动升级 SIGKILL，再等待 KILL_CONFIRM_SECONDS 确认退出
+Key constraints:
+- Always returns a JSON string (status: ok/error); execution exceptions are
+  caught and returned as error responses, never raised
+- Type safety: allow_network must be a bool (the string "false" is truthy and
+  would unintentionally allow network); timeout must be an int/float > 0 (bool
+  is a subclass of int, so exclude it explicitly); cmd/cwd must be strings
+- Blacklist check comes first: commands matching the BLACKLIST_PATTERNS regex
+  set are refused (the Seatbelt sandbox is the first line of defense, the
+  blacklist is defense in depth)
+- cwd must be a workspace subdirectory (path boundaries are normalized to
+  prevent prefix-matching traps); if the workspace is not configured, fail
+  immediately (a configuration error is raised, not returned as error JSON)
+- Output truncation: stdout/stderr are capped at BASH_MAX_OUTPUT_CHARS chars
+  per stream
+- kill_specific_process is the safe escape hatch for the bash sandbox: Seatbelt
+  rules only allow (allow signal (target self)), so bash cannot kill other
+  processes; this tool operates outside the sandbox, only allows ports in the
+  KILL_ALLOWED_PORTS whitelist, refuses the agent itself / PID 1 / system
+  processes, and re-checks before killing to prevent PID reuse (TOCTOU)
+- kill_specific_process signal strategy: SIGTERM for graceful termination,
+  auto-escalate to SIGKILL if not exited within KILL_GRACE_SECONDS, then wait
+  KILL_CONFIRM_SECONDS to confirm exit
 
-使用注意：
-- 依赖 sandbox 层（sandbox/executor.py + sandbox/profile.py）：allow_network=True
-  走网络模式（全局读 + 工作区写 + 全网络），False 走 air-gapped 模式（禁网）
-- 子进程环境隔离：剔除 VIRTUAL_ENV/PYTHONPATH 等代理环境变量与含敏感关键字的
-  环境变量，防止泄漏到子进程
-- 超时后整组进程（bash + 所有子进程）被 SIGKILL 终止
-- kill_specific_process 依赖 lsof/ps（macOS 自带）；TOCTOU 校验要求两次
-  lsof 探测一致，进程反复重启的极端场景下可能保守误拒
+Usage notes:
+- Depends on the sandbox layer (sandbox/executor.py + sandbox/profile.py):
+  allow_network=True uses the network profile (global read + workspace write +
+  full network), False uses the air-gapped profile (no network)
+- Subprocess environment isolation: strips agent environment variables such as
+  VIRTUAL_ENV/PYTHONPATH and variables containing sensitive keywords, to
+  prevent leakage into subprocesses
+- On timeout, the whole process group (bash + all children) is SIGKILLed
+- kill_specific_process relies on lsof/ps (bundled with macOS); the TOCTOU
+  check requires two consistent lsof probes; in the extreme case of a rapidly
+  restarting process it may conservatively refuse
 """
 
 import asyncio
@@ -58,24 +68,28 @@ async def bash(
     timeout: int = 30,
     allow_network: bool = True,
 ) -> str:
-    """在 Seatbelt 沙箱中执行 shell 命令。
+    """Execute a shell command in the Seatbelt sandbox.
 
-    ⚠️ 本模块仅支持 macOS（sandbox-exec + Seatbelt 沙箱）。
+    ⚠️ macOS only (sandbox-exec + Seatbelt sandbox).
 
-    执行模型：参数校验、黑名单与路径安全链（纯 CPU）留在事件循环；
-    sandbox-exec 子进程由事件循环直接管理（asyncio.create_subprocess_exec），
-    不占用线程池线程且超时可取消（wait_for + 整组 SIGKILL）。
+    Execution model: parameter validation, blacklist and path safety chain
+    (pure CPU) stay on the event loop; the sandbox-exec subprocess is managed
+    directly by the event loop (asyncio.create_subprocess_exec), so it does
+    not occupy a thread-pool thread and can be cancelled (wait_for + whole
+    group SIGKILL).
 
-    参数：
-        cmd：要执行的 shell 命令。
-        cwd：相对于工作区的工作目录（默认为 '.'）。
-        timeout：超时时间（秒），超过后自动终止（默认为 30）。
-        allow_network：是否允许网络访问（默认为 True）。
+    Args:
+        cmd: The shell command to execute.
+        cwd: Working directory relative to the workspace (default '.').
+        timeout: Timeout in seconds, after which the process is killed
+            (default 30).
+        allow_network: Whether to allow network access (default True).
 
-    返回值：
-        包含 status/exit_code/stdout/stderr/耗时以及沙箱违规信息的 JSON 字符串。
+    Returns:
+        A JSON string with status/exit_code/stdout/stderr/elapsed time and
+        the sandbox violation count.
     """
-    # 参数检查：cmd 必须是字符串
+    # Param check: cmd must be a string
     if not isinstance(cmd, str):
         return json.dumps({
             "status": "error",
@@ -83,7 +97,7 @@ async def bash(
             "message": "cmd must be a string.",
         }, ensure_ascii=False)
 
-    # 参数检查：cmd 必须是非空字符串
+    # Param check: cmd must be a non-empty string
     if not cmd.strip():
         return json.dumps({
             "status": "error",
@@ -91,7 +105,7 @@ async def bash(
             "message": "cmd must be a non-empty string.",
         }, ensure_ascii=False)
 
-    # 参数检查：allow_network 必须是布尔值（字符串 "false" 是 truthy，会误放行网络）
+    # Param check: allow_network must be a boolean (the string "false" is truthy, would unintentionally allow network)
     if not isinstance(allow_network, bool):
         return json.dumps({
             "status": "error",
@@ -99,7 +113,7 @@ async def bash(
             "message": "allow_network must be a boolean.",
         }, ensure_ascii=False)
 
-    # 参数检查：timeout 必须是 int/float（bool 是 int 子类需显式排除）
+    # Param check: timeout must be an int/float (bool is a subclass of int, exclude it explicitly)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
         return json.dumps({
             "status": "error",
@@ -107,7 +121,7 @@ async def bash(
             "message": "timeout must be a number.",
         }, ensure_ascii=False)
 
-    # 参数检查：timeout 必须大于 0
+    # Param check: timeout must be > 0
     if timeout <= 0:
         return json.dumps({
             "status": "error",
@@ -115,7 +129,7 @@ async def bash(
             "message": f"timeout must be > 0, got {timeout}.",
         }, ensure_ascii=False)
 
-    # 参数检查：cwd 必须是字符串
+    # Param check: cwd must be a string
     if not isinstance(cwd, str):
         return json.dumps({
             "status": "error",
@@ -123,7 +137,7 @@ async def bash(
             "message": "cwd must be a string.",
         }, ensure_ascii=False)
 
-    # 检查命令是否被安全策略阻止 - 黑名单校验（cmd 已确认为字符串）
+    # Blacklist check against the security policy (cmd is confirmed to be a string)
     for pattern in BLACKLIST_PATTERNS:
         if re.search(pattern, cmd):
             return json.dumps({
@@ -132,23 +146,23 @@ async def bash(
                 "message": f"Command blocked by security policy: {cmd}",
             }, ensure_ascii=False)
 
-    # 获取工作区目录，确保其存在并为绝对路径，注意！这是个极其严重的问题，工作区必须设置，如果未设置则必须立即报错！
+    # Resolve the workspace; it MUST be configured — raise immediately if missing
     workspace = settings.workspace_dir
     if not workspace:
         raise RuntimeError("WORKSPACE_DIR is not configured, please set it up.")
     workspace = os.path.abspath(workspace)
 
-    # 路径边界归一化，把工作区根统一成 恰好一个结尾分隔符 的格式，防止前缀匹配陷阱. 
+    # Normalize the workspace root to exactly one trailing separator to prevent prefix-matching traps.
     safe_root = workspace.rstrip(os.sep) + os.sep
 
-    # 确保 cwd 是绝对路径，并且是工作区的子目录。realpath 归一化
-    # 统一消解多斜杠与 .. 后再做前缀检查：若直接对用户传入的绝对路径
-    # 做字面前缀匹配，workspace///../../某目录 可穿越到工作区外。
+    # Ensure cwd is absolute and a workspace subdirectory, normalized via realpath.
+    # Resolve multiple slashes and .. before the prefix check: a literal prefix
+    # match on a user-supplied absolute path could escape via workspace///../../dir.
     if not os.path.isabs(cwd):
         cwd = os.path.join(safe_root, cwd)
     cwd = os.path.realpath(cwd)
 
-    # 确保 cwd 是工作区的子目录
+    # Ensure cwd is a workspace subdirectory
     if not (cwd + os.sep).startswith(safe_root):
         return json.dumps({
             "status": "error",
@@ -156,7 +170,7 @@ async def bash(
             "message": f"cwd '{cwd}' is outside the workspace.",
         }, ensure_ascii=False)
 
-    # 确保 timeout 大于 0
+    # Ensure timeout > 0
     if timeout <= 0:
         return json.dumps({
             "status": "error",
@@ -164,10 +178,10 @@ async def bash(
             "message": f"timeout must be > 0, got {timeout}.",
         }, ensure_ascii=False)
 
-    # 记录开始时间，用于计算耗时
+    # Record the start time for elapsed computation
     started = time.monotonic()
 
-    # 执行命令（真异步：子进程由事件循环管理，不占线程池）
+    # Execute the command (truly async: subprocess managed by the event loop, no thread pool)
     try:
         result = await sandbox_run(
             cmd=cmd,
@@ -183,10 +197,10 @@ async def bash(
             "message": f"Bash execution failed: {exc}",
         }, ensure_ascii=False)
 
-    # 记录结束时间，用于计算耗时
+    # Record the end time for elapsed computation
     elapsed = time.monotonic() - started
 
-    # 输出截断：单路最多 BASH_MAX_OUTPUT_CHARS 字符（截断标记统一 ASCII）
+    # Output truncation: at most BASH_MAX_OUTPUT_CHARS chars per stream (truncation marker is uniform ASCII)
     stdout = result["stdout"].strip()
     stderr = result["stderr"].strip()
     stdout_show = stdout[:BASH_MAX_OUTPUT_CHARS] + (
@@ -194,7 +208,7 @@ async def bash(
     stderr_show = stderr[:BASH_MAX_OUTPUT_CHARS] + (
         "..." if len(stderr) > BASH_MAX_OUTPUT_CHARS else "")
 
-    # 构造返回结果
+    # Build the return result
     return json.dumps({
         "status": "ok",
         "tool_name": "bash",
@@ -209,17 +223,19 @@ async def bash(
 
 
 async def _run_probe(args: list[str]) -> tuple[int, str]:
-    """运行短时探测命令（lsof/ps），返回 (returncode, stdout)。
+    """Run a short probe command (lsof/ps), returning (returncode, stdout).
 
-    供 kill_specific_process 的进程探测复用：子进程由事件循环直接管理
-    （create_subprocess_exec），不占用线程池线程；超时（>5s）时先
-    kill 收尸再抛 TimeoutError，由调用方决定降级语义。
+    Reused by kill_specific_process for process probing: the subprocess is
+    managed directly by the event loop (create_subprocess_exec), so it does
+    not occupy a thread-pool thread; on timeout (>5s) the process is killed
+    and reaped before raising TimeoutError, letting the caller decide the
+    fallback semantics.
 
     Args:
-        args: 探测命令 argv 列表（如 ["lsof", "-ti", "tcp:8000"]）。
+        args: The probe command argv list (e.g. ["lsof", "-ti", "tcp:8000"]).
 
     Returns:
-        (returncode, stdout 文本)；stdout 以 utf-8 容错解码。
+        (returncode, stdout text); stdout is decoded with utf-8 error tolerance.
     """
     proc = await asyncio.create_subprocess_exec(
         *args,
@@ -229,7 +245,7 @@ async def _run_probe(args: list[str]) -> tuple[int, str]:
     try:
         stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
     except TimeoutError:
-        # wait_for 已取消 communicate，先终止再收尸，避免探测进程泄漏
+        # wait_for already cancelled communicate; kill first, then reap, to avoid probe process leaks
         proc.kill()
         await proc.wait()
         raise
@@ -237,14 +253,15 @@ async def _run_probe(args: list[str]) -> tuple[int, str]:
 
 
 async def _lsof_pids(port: int) -> list[int]:
-    """返回监听指定 TCP 端口的 PID 列表（lsof 退出码 1 表示无匹配）。
+    """Return the PIDs listening on the given TCP port (lsof exit code 1 = no match).
 
     Args:
-        port: 要查询的 TCP 端口。
+        port: The TCP port to query.
 
     Returns:
-        PID 列表；lsof 无匹配或输出无有效数字时为空列表。
-        探测超时抛 TimeoutError，由调用方兜底转 error 响应。
+        A list of PIDs; empty when lsof has no match or the output has no
+        valid numbers. Probe timeout raises TimeoutError, caught by the
+        caller and turned into an error response.
     """
     returncode, stdout = await _run_probe(["lsof", "-ti", f"tcp:{port}"])
     if returncode != 0:
@@ -253,13 +270,14 @@ async def _lsof_pids(port: int) -> list[int]:
 
 
 async def _process_comm(pid: int) -> str:
-    """返回进程名（ps 的 comm 字段）；进程不存在或获取失败返回空串。
+    """Return the process name (ps comm field); empty string if missing or unreadable.
 
     Args:
-        pid: 目标进程 ID。
+        pid: The target process ID.
 
     Returns:
-        进程名；探测失败（含超时/进程不存在）返回空串。
+        The process name; empty string on probe failure (including timeout
+        or a nonexistent process).
     """
     try:
         returncode, stdout = await _run_probe(["ps", "-p", str(pid), "-o", "comm="])
@@ -271,21 +289,23 @@ async def _process_comm(pid: int) -> str:
 
 
 async def _pid_alive(pid: int) -> bool:
-    """检查进程是否存活（ps 状态字段；僵尸 Z 视为已退出）。
+    """Check whether a process is alive (ps status field; zombie Z counts as exited).
 
-    不能用 os.kill(pid, 0) 探测：进程被 SIGKILL 后若父进程未 reap，
-    会以僵尸态存在，0 信号探测仍返回存在，导致误报"未退出"。
+    os.kill(pid, 0) must not be used for probing: after SIGKILL, a process
+    whose parent has not reaped it remains as a zombie, and the 0-signal
+    probe still reports it as present, falsely reporting "not exited".
 
     Args:
-        pid: 目标进程 ID。
+        pid: The target process ID.
 
     Returns:
-        True 表示存活；ps 探测失败时保守视为存活（后续有权限错误兜底）。
+        True if alive; conservatively treated as alive when the ps probe
+        fails (a permission error fallback follows later).
     """
     try:
         returncode, stdout = await _run_probe(["ps", "-p", str(pid), "-o", "stat="])
         if returncode != 0:
-            return False  # 进程不存在
+            return False  # process does not exist
         stat = stdout.strip()
         return bool(stat) and "Z" not in stat
     except Exception:
@@ -293,14 +313,14 @@ async def _pid_alive(pid: int) -> bool:
 
 
 async def _wait_exit(pid: int, seconds: float) -> bool:
-    """轮询等待进程退出，最多 seconds 秒；已退出返回 True。
+    """Poll until the process exits, at most seconds; True if exited.
 
     Args:
-        pid:     目标进程 ID。
-        seconds: 最长等待秒数。
+        pid:      The target process ID.
+        seconds:  Maximum wait time in seconds.
 
     Returns:
-        True 表示已退出；超时仍存活返回 False。
+        True if exited; False if still alive after the timeout.
     """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -311,32 +331,36 @@ async def _wait_exit(pid: int, seconds: float) -> bool:
 
 
 async def kill_specific_process(port: int) -> str:
-    """杀死监听指定端口的进程（bash 沙箱的安全出口）。
+    """Kill the process listening on the given port (safe escape hatch from the bash sandbox).
 
-    ⚠️ 仅 macOS。Seatbelt 沙箱规则只允许 (allow signal (target self))，
-    bash 工具无法杀死其他进程——本工具在沙箱外直接操作，是唯一能
-    停止开发服务器（npm run dev、uvicorn 等）的入口。
+    ⚠️ macOS only. The Seatbelt sandbox rules only allow (allow signal
+    (target self)), so the bash tool cannot kill other processes — this tool
+    operates directly outside the sandbox and is the only way to stop a dev
+    server (npm run dev, uvicorn, etc.).
 
-    安全边界：
-    - port 必须落在 KILL_ALLOWED_PORTS 端口段白名单内
-    - 拒绝 kill agent 自身（os.getpid()）与 PID 1
-    - 拒绝系统进程（KILL_SYSTEM_PROCESS_NAMES）
-    - TOCTOU 防护：kill 前二次 lsof 确认 PID 仍监听该端口，防 PID 复用误杀
+    Safety boundaries:
+    - port must fall inside the KILL_ALLOWED_PORTS port-range whitelist
+    - refuses to kill the agent itself (os.getpid()) and PID 1
+    - refuses system processes (KILL_SYSTEM_PROCESS_NAMES)
+    - TOCTOU protection: a second lsof check confirms the PID still listens
+      on the port before killing, to prevent killing a reused PID
 
-    信号策略：先 SIGTERM 优雅终止，KILL_GRACE_SECONDS 秒内未退出自动
-    升级 SIGKILL，再等待 KILL_CONFIRM_SECONDS 确认退出。
+    Signal strategy: SIGTERM first for graceful termination; auto-escalate to
+    SIGKILL if not exited within KILL_GRACE_SECONDS, then wait
+    KILL_CONFIRM_SECONDS to confirm exit.
 
-    执行模型：参数校验与白名单检查（纯 CPU）留在事件循环；lsof/ps 探测
-    子进程由事件循环直接管理（create_subprocess_exec），退出轮询用
-    asyncio.sleep 异步休眠，不占用线程池线程。
+    Execution model: parameter validation and whitelist checks (pure CPU)
+    stay on the event loop; lsof/ps probe subprocesses are managed directly
+    by the event loop (create_subprocess_exec); exit polling uses
+    asyncio.sleep, so no thread-pool threads are occupied.
 
-    参数：
-        port：目标端口（1~65535）。
+    Args:
+        port: The target port (1~65535).
 
-    返回值：
-        包含 status/port/killed 列表（pid/name/signal_used/graceful）的 JSON 字符串。
+    Returns:
+        A JSON string with status/port/killed list (pid/name/signal_used/graceful).
     """
-    # 参数检查：port 必须是 int（bool 是 int 子类需显式排除）
+    # Param check: port must be an int (bool is a subclass of int, exclude it explicitly)
     if not isinstance(port, int) or isinstance(port, bool):
         return json.dumps({
             "status": "error",
@@ -344,7 +368,7 @@ async def kill_specific_process(port: int) -> str:
             "message": "port must be an integer.",
         }, ensure_ascii=False)
 
-    # 参数检查：port 必须在合法端口范围
+    # Param check: port must be in the valid port range
     if not 1 <= port <= 65535:
         return json.dumps({
             "status": "error",
@@ -353,7 +377,7 @@ async def kill_specific_process(port: int) -> str:
             "message": f"port must be in 1..65535, got {port}.",
         }, ensure_ascii=False)
 
-    # 端口白名单：只允许杀 KILL_ALLOWED_PORTS 段内的开发端口
+    # Port whitelist: only kill dev ports inside the KILL_ALLOWED_PORTS ranges
     if not any(lo <= port <= hi for lo, hi in KILL_ALLOWED_PORTS):
         return json.dumps({
             "status": "error",
@@ -362,7 +386,7 @@ async def kill_specific_process(port: int) -> str:
             "message": f"Port {port} is not in the allowed ranges: {list(KILL_ALLOWED_PORTS)}.",
         }, ensure_ascii=False)
 
-    # 定位监听进程（沙箱外只读操作，lsof 是 macOS 自带工具）
+    # Locate the listening process (read-only operation outside the sandbox; lsof is bundled with macOS)
     try:
         pids = await _lsof_pids(port)
     except Exception as exc:
@@ -381,10 +405,10 @@ async def kill_specific_process(port: int) -> str:
             "message": f"No process listening on port {port}.",
         }, ensure_ascii=False)
 
-    # 逐 PID 校验并终止（lsof 可能返回多个监听者）
+    # Validate and kill each PID in turn (lsof may return multiple listeners)
     killed = []
     for pid in pids:
-        # 自保检查：拒绝 kill agent 自身与 PID 1
+        # Self-protection: refuse to kill the agent itself or PID 1
         if pid == os.getpid() or pid == 1:
             return json.dumps({
                 "status": "error",
@@ -402,7 +426,7 @@ async def kill_specific_process(port: int) -> str:
                 "message": f"Could not determine process name for PID {pid}; aborting.",
             }, ensure_ascii=False)
 
-        # 系统进程拒绝（纵深防御；root 进程通常也会因权限不足被兜底拦截）
+        # Refuse system processes (defense in depth; root-owned processes are usually blocked anyway by permission errors)
         if name in KILL_SYSTEM_PROCESS_NAMES:
             return json.dumps({
                 "status": "error",
@@ -411,7 +435,7 @@ async def kill_specific_process(port: int) -> str:
                 "message": f"Refusing to kill system process '{name}' (PID {pid}).",
             }, ensure_ascii=False)
 
-        # TOCTOU 防护：kill 前二次校验 PID 仍监听该端口（防 PID 复用误杀）
+        # TOCTOU protection: re-check that the PID still listens on the port before killing (prevents killing a reused PID)
         try:
             current = await _lsof_pids(port)
         except Exception as exc:
@@ -429,7 +453,7 @@ async def kill_specific_process(port: int) -> str:
                 "message": f"Refusing to kill PID {pid}: process identity changed between checks.",
             }, ensure_ascii=False)
 
-        # SIGTERM 优雅终止；进程已自行退出视为成功（窗口期）
+        # Graceful SIGTERM; if the process already exited by itself, treat as success (race window)
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -443,7 +467,7 @@ async def kill_specific_process(port: int) -> str:
                 "message": f"Permission denied killing PID {pid} ({name}).",
             }, ensure_ascii=False)
 
-        # 等待优雅退出；超时未退出则升级 SIGKILL 强制终止
+        # Wait for graceful exit; escalate to SIGKILL if the timeout expires
         signal_used = "SIGTERM"
         graceful = True
         if not await _wait_exit(pid, KILL_GRACE_SECONDS):
@@ -452,7 +476,7 @@ async def kill_specific_process(port: int) -> str:
                 signal_used = "SIGKILL"
                 graceful = False
             except ProcessLookupError:
-                pass  # 已在 SIGTERM 与 SIGKILL 之间退出
+                pass  # exited between SIGTERM and SIGKILL
             except PermissionError:
                 return json.dumps({
                     "status": "error",
@@ -461,7 +485,7 @@ async def kill_specific_process(port: int) -> str:
                     "message": f"Permission denied killing PID {pid} ({name}).",
                 }, ensure_ascii=False)
 
-        # SIGKILL 后确认退出（不可中断状态/僵尸可能残留）
+        # Confirm exit after SIGKILL (uninterruptible state / zombie may linger)
         if not await _wait_exit(pid, KILL_CONFIRM_SECONDS):
             return json.dumps({
                 "status": "error",

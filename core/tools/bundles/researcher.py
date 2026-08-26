@@ -1,4 +1,4 @@
-"""Tool definitions owned by the orchestrator.
+"""Tool definitions owned by the researcher sub-agent.
 
 Lightweight wrappers binding kernel implementations to the @tool decorator.
 
@@ -8,21 +8,15 @@ Tools provided:
     ├── grep_tool                        search file content with regex
     ├── str_replace                      replace exact text in a file
     ├── write_file                       create or overwrite a file's text
-    ├── clean_dir                        safely delete files or dirs in the workspace
     ├── bash                             run shell commands in the sandbox
-    ├── kill_specific_process            kill the process listening on a port
     ├── web_search                       search the web
     ├── web_fetch                        fetch a web page
-    ├── end_orchestration                end the current orchestration
-    ├── pause_orchestration              pause and wait for human input, HITL
-    ├── fanout_subagents                 dispatch sub-agents
     ├── make_plan                        create a new execution plan from phases
     ├── edit_plan                        modify one or more plan phases
     └── delete_plan                      remove a phase or clear the whole plan
 """
 
 import json
-from typing import Any
 
 from langchain_core.tools import tool
 from langchain_core.messages import ToolMessage
@@ -31,14 +25,12 @@ from langgraph.prebuilt import ToolRuntime
 
 from core.tools.descriptions.fs_mutate import TOOL_DESCRIPTION as FS_MUTATE_DESCRIPTION
 from core.tools.descriptions.fs_readonly import TOOL_DESCRIPTION as FS_READONLY_DESCRIPTION
-from core.tools.descriptions.orch_control import TOOL_DESCRIPTION as ORCH_CONTROL_DESCRIPTION
 from core.tools.descriptions.plan import TOOL_DESCRIPTION as PLAN_DESCRIPTION
 from core.tools.descriptions.web import TOOL_DESCRIPTION as WEB_DESCRIPTION
 from core.tools.descriptions.bash import TOOL_DESCRIPTION as BASH_DESCRIPTION
 from core.tools._kernel._fs_mutate import (
     str_replace as _str_replace,
     write_file as _write_file,
-    clean_dir as _clean_dir,
 )
 from core.tools._kernel._fs_readonly import (
     view_file as _view_file,
@@ -50,18 +42,12 @@ from core.tools._kernel._plan import (
     edit_plan as _edit_plan,
     delete_plan as _delete_plan,
 )
-from core.tools._kernel._orch_control import (
-    end_orchestration as _end_orchestration,
-    pause_orchestration as _pause_orchestration,
-    fanout_subagents as _fanout_subagents,
-)
 from core.tools._kernel._web import (
     web_search as _web_search,
     web_fetch as _web_fetch,
 )
 from core.tools._kernel._bash import (
     bash as _bash,
-    kill_specific_process as _kill_specific_process,
 )
 
 
@@ -153,17 +139,6 @@ async def write_file(
     )
 
 
-@tool("clean_dir", description=FS_MUTATE_DESCRIPTION["clean_dir"])
-async def clean_dir(
-    dir_path: str,
-    patterns: list[str] | None = None,
-) -> str:
-    return await _clean_dir(
-        dir_path,
-        patterns,
-    )
-
-
 @tool("bash", description=BASH_DESCRIPTION["bash"])
 async def bash(
     cmd: str,
@@ -176,15 +151,6 @@ async def bash(
         cwd,
         timeout,
         allow_network,
-    )
-
-
-@tool("kill_specific_process", description=BASH_DESCRIPTION["kill_specific_process"])
-async def kill_specific_process(
-    port: int,
-) -> str:
-    return await _kill_specific_process(
-        port,
     )
 
 
@@ -212,62 +178,6 @@ async def web_fetch(
         url,
         prompt,
     )
-
-    
-@tool("end_orchestration", description=ORCH_CONTROL_DESCRIPTION["end_orchestration"])
-async def end_orchestration(
-    response: Any,
-    runtime: ToolRuntime
-) -> Command | str:
-    result = _end_orchestration(
-        response,
-        runtime.state["response"],
-        plan=runtime.state.get("plan"),
-    )
-
-    r = json.loads(result)
-
-    if r["status"] == "error":
-        return r["message"]
-
-    return Command(update={
-        "response": response.strip(),
-        "messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
-    })
-
-
-@tool("pause_orchestration", description=ORCH_CONTROL_DESCRIPTION["pause_orchestration"])
-async def pause_orchestration(runtime: ToolRuntime) -> Command | str:
-    result = _pause_orchestration(runtime.state["should_orchestration_pause"])
-
-    r = json.loads(result)
-
-    if r["status"] == "error":
-        return r["message"]
-
-    return Command(update={
-        "should_orchestration_pause": True,
-        "messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
-    })
-
-
-@tool("fanout_subagents", description=ORCH_CONTROL_DESCRIPTION["fanout_subagents"])
-async def fanout_subagents(
-    tasks: Any, 
-    runtime: ToolRuntime
-) -> Command | str:
-    result = _fanout_subagents(tasks, runtime.state["sub_agent_round_tasks"])
-
-    r = json.loads(result)
-
-    if r["status"] == "error":
-        return r["message"]
-
-    return Command(update={
-        "sub_agent_round_tasks": r["tasks"],
-        "active_sub_agent_count": len(r["tasks"]),
-        "messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
-    })
 
 
 @tool("make_plan", description=PLAN_DESCRIPTION["make_plan"])
@@ -319,20 +229,15 @@ def delete_plan(
     })
 
 
-ORCHESTRATOR_TOOLS = [
+RESEARCHER_TOOLS = [
     view_file,
     glob_tool,
     grep_tool,
     str_replace,
     write_file,
-    clean_dir,
     bash,
-    kill_specific_process,
     web_search,
     web_fetch,
-    end_orchestration,
-    pause_orchestration,
-    fanout_subagents,
     make_plan,
     edit_plan,
     delete_plan,

@@ -1,8 +1,8 @@
-""" 网络工具集合（_web）的工具描述
+"""Tool descriptions for the web toolset (_web).
 
-工具表述包括:
-- web_search                搜索网页内容
-- fetch_web                 获取网页内容
+Tools described:
+- web_search    search web content
+- web_fetch     fetch web page content
 """
 
 TOOL_DESCRIPTION = {
@@ -14,9 +14,9 @@ TOOL_DESCRIPTION = {
         "- allowed_domains / blocked_domains: optional domain filter (mutually exclusive)\n"
         "\n"
         "Returns JSON: {\"status\":\"ok\",\"total_results\":N,\"results\":[{...}]}\n"
-        "Use for: up-to-date info, docs, recent news. Do NOT use for known URLs — use fetch_web."
+        "Use for: up-to-date info, docs, recent news. Do NOT use for known URLs — use web_fetch."
     ),
-    "fetch_web": (
+    "web_fetch": (
         "Fetch a web page via Chromium browser and return clean Markdown.\n"
         "Parameters:\n"
         "- url: full HTTPS URL (max 2048 chars, private/internal IPs blocked)\n"

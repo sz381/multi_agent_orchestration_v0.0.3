@@ -1,10 +1,9 @@
-"""
-计划管理工具集合（_plan）的工具描述
+"""Tool descriptions for the plan management toolset (_plan).
 
-工具表述包括:
-- make_plan                       从阶段列表中创建新的执行计划
-- edit_plan                       修改计划中的一个或多个阶段
-- delete_plan                     移除一个阶段或清空整个计划
+Tools described:
+- make_plan     create a new execution plan from a list of phases
+- edit_plan     modify one or more phases of a plan
+- delete_plan   remove a phase or clear the entire plan
 """
 
 TOOL_DESCRIPTION = {

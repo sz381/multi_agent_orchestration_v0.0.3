@@ -1,9 +1,9 @@
-"""只读工具集合（_fs_readonly）的工具描述
+"""Tool descriptions for the read-only toolset (_fs_readonly).
 
-工具表述包括:
-- glob_tool                     按模式匹配查找文件
-- view_file                     按行号读取文件内容
-- grep_tool                     正则搜索文件内容
+Tools described:
+- glob_tool     find files by glob pattern
+- view_file     read file contents by line numbers
+- grep_tool     search file contents with regex
 """
 
 TOOL_DESCRIPTION = {

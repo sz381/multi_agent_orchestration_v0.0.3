@@ -1,30 +1,30 @@
-"""控制类工具单轮互斥的 ToolNode 中间件。
+"""ToolNode middleware for single-turn exclusivity of control tools.
 
-提供类：
-- ControlAwareToolNode:    子类化 ToolNode，对控制类工具做单轮互斥
+Class provided:
+- ControlAwareToolNode:             subclass of ToolNode enforcing single-turn exclusivity for control tools
 
-关键约束：
-- 判定基于本轮 tool calls 列表本身，不依赖 state 快照，真并行也拦得住
-- 控制类工具独占本轮：出现控制类工具时只执行第一个控制调用，其余所有调用
-  （其他控制类 + 普通工具）一律拒绝，不可混用
-- 被拒绝的调用必须补 ToolMessage（tool_call_id 匹配原 call），保证消息配对
-- _afunc/_func 是 langgraph 内部方法（requirements 已锁 langgraph==1.2.10），
-  升级版本需回归测试
+Key constraints:
+- Decision is based on the current turn's tool calls list itself, not a state snapshot, so true parallelism is also covered
+- Control tools are exclusive per turn: when one appears, only the first control call runs, all other calls, control or normal, are rejected, no mixing allowed
+- Rejected calls must get a ToolMessage with the original tool_call_id to keep message pairing
+- _afunc/_func are internal langgraph methods, requirements pin langgraph==1.2.10; upgrading the version needs regression tests
 
-背景：
-- langgraph 的 ToolNode 对同一轮的多个 tool calls 是并发执行的（asyncio.gather），
-  每个工具拿到的是执行前同一份 state 快照——因此 kernel 层的参数校验
-  （如 current_response 防 last-win）无法区分同轮并行调用
-- orchestrator 单轮决策中，控制类工具（end_orchestration、fanout_subagents、
-  pause_orchestration、make_plan、edit_plan、delete_plan）必须独占本轮：
-  一次只能调用一个控制工具，且不能与其他任何工具混用；否则并行的
-  Command(update=...) 按序合并时同字段后写覆盖前写，导致任务丢失
+Background:
+- langgraph ToolNode runs multiple tool calls of one turn concurrently via
+  asyncio.gather, each tool sees the same state snapshot taken before
+  execution, so kernel-level validation such as current_response against
+  last-win cannot distinguish parallel calls in the same turn
+- In one orchestrator turn, control tools, end_orchestration,
+  fanout_subagents, pause_orchestration, make_plan, edit_plan, delete_plan,
+  must be exclusive: one control tool per turn, never mixed with other tools;
+  otherwise parallel Command(update=...) merges in order and later writes to
+  the same field overwrite earlier ones, losing tasks
 
-使用注意：
-- 用法：node = ControlAwareToolNode(tools, control_tool_names=CONTROL_TOOL_NAMES)
-  然后作为普通 ToolNode 节点接入 StateGraph（同步 invoke 走 _func，异步走 _afunc）
-- control_tool_names 由调用方（bundle 注册处）注入，避免硬编码
-- 拒绝消息引导模型下轮只发一个控制调用，实现自愈
+Usage notes:
+- Usage: node = ControlAwareToolNode(tools, control_tool_names=CONTROL_TOOL_NAMES), then wire it into StateGraph as a
+            normal ToolNode, sync invoke goes through _func, async through _afunc
+- control_tool_names is injected by the caller, the bundle registration site, avoiding hardcoding
+- Rejection messages guide the model to send only one control call next turn, achieving self-healing
 """
 
 import asyncio
@@ -41,11 +41,12 @@ from langgraph.prebuilt.tool_node import ToolNode, ToolRuntime
 
 
 class ControlAwareToolNode(ToolNode):
-    """控制类工具本轮独占的 ToolNode。
+    """ToolNode that makes control tools exclusive within a turn.
 
-    同一轮出现控制类工具调用时，只执行第一个控制调用，其余所有调用
-    （其他控制类 + 普通工具）被拒绝并返回说明消息（引导模型下轮重试），
-    防止并行 Command 更新互相覆盖。
+    When a control tool call appears in the same turn, only the first control
+    call runs, all other calls, control or normal, are rejected with an
+    explanatory message guiding the model to retry next turn, preventing
+    parallel Command updates from overwriting each other.
     """
 
     def __init__(
@@ -55,14 +56,16 @@ class ControlAwareToolNode(ToolNode):
         control_tool_names: set[str],
         **kwargs: Any,
     ) -> None:
-        """初始化 ControlAwareToolNode。
+        """Initialize ControlAwareToolNode.
 
         Args:
-            tools: 工具序列（BaseTool 或可转换为 BaseTool 的可调用对象），
-                与 ToolNode 的 tools 参数一致。
-            control_tool_names: 控制类工具名集合；命中该集合的工具本轮独占，
-                出现时只执行第一个控制调用，其余调用一律拒绝。
-            **kwargs: 透传给 ToolNode 的其他参数（name/messages_key 等）。
+            tools: tool sequence of BaseTool or callables convertible to
+                BaseTool, same as the tools argument of ToolNode.
+            control_tool_names: set of control tool names; tools in this set
+                are exclusive per turn, only the first control call runs when
+                one appears, all other calls are rejected.
+            **kwargs: other arguments passed through to ToolNode, such as
+                name or messages_key.
         """
         super().__init__(tools, **kwargs)
         self._control_tool_names = frozenset(control_tool_names)
@@ -70,22 +73,25 @@ class ControlAwareToolNode(ToolNode):
     def _filter_control_calls(
         self, tool_calls: list[dict]
     ) -> tuple[list[dict], list[dict]]:
-        """互斥过滤：控制类工具本轮独占。
+        """Exclusivity filter: control tools own the turn.
 
-        规则：
-        - 本轮无控制类工具：全部保留，普通工具可继续并行（view_file 等可多个）
-        - 本轮有控制类工具：只保留第一个控制类调用，其余所有调用
-          （其他控制类 + 所有普通工具）一律拒绝，控制调用不可与其他工具混用
+        Rules:
+        - No control tool in this turn: keep all calls, normal tools can keep
+            running in parallel, e.g. multiple view_file calls
+        - Control tool present: keep only the first control call, reject all
+            other calls, including other control tools and all normal tools,
+            control calls cannot mix with other tools
 
         Args:
-            tool_calls: 本轮全部工具调用列表（langgraph ToolCall 字典，
-                含 name/args/id 等字段）。
+            tool_calls: all tool calls of this turn, langgraph ToolCall dicts
+                with fields such as name, args, and id.
 
         Returns:
-            (kept, rejected) 二元组：kept 为保留执行的调用列表；
-            rejected 为被拒绝的调用列表（需补拒绝 ToolMessage 保证消息配对）。
+            (kept, rejected) tuple: kept is the calls to run, rejected is the
+            calls refused, each needing a rejection ToolMessage to keep
+            message pairing.
         """
-        # 找第一个控制类调用；无控制类则全部放行
+        # find the first control call; pass all through when there is none
         first_control_idx = next(
             (
                 i
@@ -97,7 +103,7 @@ class ControlAwareToolNode(ToolNode):
         if first_control_idx is None:
             return tool_calls, []
 
-        # 有控制类：独占本轮——保留第一个控制调用，其余全部拒绝
+        # control tool present: own the turn, keep the first control call, reject the rest
         kept = [tool_calls[first_control_idx]]
         rejected = [
             call for i, call in enumerate(tool_calls) if i != first_control_idx
@@ -105,16 +111,18 @@ class ControlAwareToolNode(ToolNode):
         return kept, rejected
 
     def _reject_message(self, call: dict) -> ToolMessage:
-        """为被拒绝的调用构造拒绝 ToolMessage。
+        """Build a rejection ToolMessage for a rejected call.
 
-        消息内容说明控制类工具独占规则，引导模型下轮只发一个控制调用；
-        tool_call_id 必须匹配原 call 的 id，保证每个 tool_call 都有对应响应。
+        The message explains the control tool exclusivity rule and guides the
+        model to send only one control call next turn; tool_call_id must match
+        the original call's id so every tool_call has a response.
 
         Args:
-            call: 被拒绝的工具调用（langgraph ToolCall 字典）。
+            call: the rejected tool call, a langgraph ToolCall dict.
 
         Returns:
-            配对 tool_call_id 的 ToolMessage，content 为互斥规则说明。
+            a ToolMessage paired with the tool_call_id, content explains the
+            exclusivity rule.
         """
         names = ", ".join(sorted(self._control_tool_names))
         return ToolMessage(
@@ -133,30 +141,36 @@ class ControlAwareToolNode(ToolNode):
         config: RunnableConfig,
         runtime: Any,
     ) -> Any:
-        """异步执行本轮工具调用（覆写 ToolNode._afunc）。
+        """Run the current turn's tool calls asynchronously, overriding ToolNode._afunc.
 
-        在父类并发执行之前插入互斥过滤：控制类工具同轮只保留第一个，
-        其余被拒绝并补 ToolMessage（见 _filter_control_calls/_reject_message）。
-        主体逻辑复制自 langgraph 1.2.10 的 ToolNode._afunc——langgraph 没有
-        提供"执行前可见本轮全部 tool calls"的钩子，只能在主入口复制后插桩。
+        Inserts the exclusivity filter before the parent's concurrent
+        execution: keep only the first control call of the turn, reject the
+        rest with ToolMessages, see _filter_control_calls and _reject_message.
+        The main logic is copied from ToolNode._afunc of langgraph 1.2.10,
+        because langgraph offers no hook to see all tool calls of the turn
+        before execution, so the only option is copying the main entry and
+        inserting instrumentation.
 
         Args:
-            input: 图节点输入：消息列表或含 messages 键的 state 字典，
-                最后一条 AIMessage 的 tool_calls 将被解析执行。
-            config: 运行配置（langgraph 自动注入，含 runtime 等）。
-            runtime: 运行时上下文（langgraph 自动注入）。
+            input: graph node input, a message list or a state dict with a
+                messages key; tool_calls of the last AIMessage are parsed and
+                executed.
+            config: run configuration, auto-injected by langgraph, includes
+                runtime etc.
+            runtime: runtime context, auto-injected by langgraph.
 
         Returns:
-            与父类一致：ToolMessage 列表或 {messages_key: [ToolMessage]}，
-            由 _combine_tool_outputs 按 input_type 打包。
+            same as the parent: a ToolMessage list or
+            {messages_key: [ToolMessage]}, packaged by _combine_tool_outputs
+            according to input_type.
         """
-        # 复制自 ToolNode._afunc（langgraph 1.2.10），插入互斥过滤
+        # copied from ToolNode._afunc, langgraph 1.2.10, with the exclusivity filter inserted
         tool_calls, input_type = self._parse_input(input)
         kept_calls, rejected_calls = self._filter_control_calls(tool_calls)
 
         config_list = get_config_list(config, len(kept_calls))
 
-        # 为保留的调用构造 ToolRuntime（与父类一致）
+        # build a ToolRuntime for each kept call, same as the parent
         tool_runtimes = []
         for call, cfg in zip(kept_calls, config_list, strict=False):
             state = self._extract_state(input, cfg)
@@ -179,7 +193,7 @@ class ControlAwareToolNode(ToolNode):
         ]
         outputs = await asyncio.gather(*coros)
 
-        # 被拒绝的调用补拒绝消息，保证每个 tool_call 都有对应响应
+        # append rejection messages for rejected calls so every tool_call has a response
         outputs.extend(self._reject_message(call) for call in rejected_calls)
 
         return self._combine_tool_outputs(outputs, input_type)
@@ -190,28 +204,32 @@ class ControlAwareToolNode(ToolNode):
         config: RunnableConfig,
         runtime: Any,
     ) -> Any:
-        """同步执行本轮工具调用（覆写 ToolNode._func）。
+        """Run the current turn's tool calls synchronously, overriding ToolNode._func.
 
-        与 _afunc 相同的互斥过滤逻辑，供图以同步方式（invoke）运行时使用；
-        主体逻辑复制自 langgraph 1.2.10 的 ToolNode._func。
+        Same exclusivity filter as _afunc, used when the graph runs
+        synchronously via invoke; main logic copied from ToolNode._func of
+        langgraph 1.2.10.
 
         Args:
-            input: 图节点输入：消息列表或含 messages 键的 state 字典，
-                最后一条 AIMessage 的 tool_calls 将被解析执行。
-            config: 运行配置（langgraph 自动注入，含 runtime 等）。
-            runtime: 运行时上下文（langgraph 自动注入）。
+            input: graph node input, a message list or a state dict with a
+                messages key; tool_calls of the last AIMessage are parsed and
+                executed.
+            config: run configuration, auto-injected by langgraph, includes
+                runtime etc.
+            runtime: runtime context, auto-injected by langgraph.
 
         Returns:
-            与父类一致：ToolMessage 列表或 {messages_key: [ToolMessage]}，
-            由 _combine_tool_outputs 按 input_type 打包。
+            same as the parent: a ToolMessage list or
+            {messages_key: [ToolMessage]}, packaged by _combine_tool_outputs
+            according to input_type.
         """
-        # 复制自 ToolNode._func（langgraph 1.2.10），插入互斥过滤
+        # copied from ToolNode._func, langgraph 1.2.10, with the exclusivity filter inserted
         tool_calls, input_type = self._parse_input(input)
         kept_calls, rejected_calls = self._filter_control_calls(tool_calls)
 
         config_list = get_config_list(config, len(kept_calls))
 
-        # 为保留的调用构造 ToolRuntime（与父类一致）
+        # build a ToolRuntime for each kept call, same as the parent
         tool_runtimes = []
         for call, cfg in zip(kept_calls, config_list, strict=False):
             state = self._extract_state(input, cfg)
@@ -228,7 +246,7 @@ class ControlAwareToolNode(ToolNode):
             )
             tool_runtimes.append(tool_runtime)
 
-        # 同步执行保留的调用（与父类一致）
+        # run the kept calls synchronously, same as the parent
         with get_executor_for_config(config) as executor:
             outputs = list(
                 executor.map(
@@ -239,7 +257,7 @@ class ControlAwareToolNode(ToolNode):
                 )
             )
 
-        # 被拒绝的调用补拒绝消息，保证每个 tool_call 都有对应响应
+        # append rejection messages for rejected calls so every tool_call has a response
         outputs.extend(self._reject_message(call) for call in rejected_calls)
 
         return self._combine_tool_outputs(outputs, input_type)

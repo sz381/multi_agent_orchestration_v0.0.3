@@ -1,39 +1,47 @@
-""" 工具常量
+"""Tool constants.
 
-提供常量：
-- MAX_READ_SIZE:                        最大读取大小   默认 1MB
-- VIEW_FILE_MAX_SKIP_BYTES:             view_file 跳过目标行时的软限制字节数   默认 50MB
-- BINARY_SNIFF_BYTES:                   view_file 二进制嗅探的头部采样字节数   默认 8KB
-- EXCLUDE_DIRS:                         排除的目录
-- EXCLUDE_FILES:                        排除的文件
-- GLOB_MAX_RESULTS:                     glob_tool 最大结果数   默认 200
-- GLOB_MAX_SCAN:                        glob_tool 最大扫描数   默认 5000
-- GREP_MAX_FILES:                       grep_tool 最大搜索文件数   默认 5000
-- GREP_MAX_FILE_SIZE:                   grep_tool 单文件大小上限   默认 10MB
-- REGEX_MATCH_TIMEOUT_SECONDS:          正则单次匹配操作超时（防灾难性回溯）   默认 2s
-- GREP_TOTAL_TIMEOUT_SECONDS:           grep_tool 整次搜索总时长预算（wall-clock）   默认 30s
-- MAX_WRITE_SIZE:                       最大写入大小   默认 1MB
-- MAX_DIFF_SIZE:                        最大差异大小   默认 500
-- CLEAN_MAX_ITEMS:                      最大清理项目数   默认 500
-- PLAN_MAX_PHASES:                      最大计划阶段数   默认 12
-- PHASE_VALID_STATUSES:                 阶段有效状态集合
-- PHASE_REQUIRED_FIELDS:                阶段必需字段集合
-- PHASE_ALLOWED_UPDATE_FIELDS:          阶段允许更新字段集合
-- MAX_RESPONSE_LENGTH:                  最大响应长度   默认 100K
-- MAX_TASKS:                            最大任务数     默认 20, subagent 并发数量限制
-- REQUIRED_TASK_FIELDS:                 任务必需字段集合
-- ALLOWED_OPTIONAL_FIELDS:              任务允许的可选字段集合, 这个是给 subagent 的 system prompt 注入指定 working directory 用的
-- AVAILABLE_SUBAGENT_PREFIXES:          可用的 subagent 前缀集合
-- BLACKLIST_PATTERNS:                   bash 命令黑名单正则集合（纵深防御，Seatbelt 沙箱为第一道防线）
-- BASH_MAX_OUTPUT_CHARS:                bash 单路（stdout/stderr）返回给模型的最大字符数   默认 806
-- KILL_ALLOWED_PORTS:                   kill_specific_process 端口段白名单（含两端）   默认 (3000,3100)/(5000,5200)/(8000,8100)
-- KILL_GRACE_SECONDS:                   SIGTERM 后等待优雅退出的秒数   默认 3
-- KILL_CONFIRM_SECONDS:                 SIGKILL 后确认退出的秒数   默认 2
-- KILL_POLL_INTERVAL:                   退出探测轮询间隔（秒）   默认 0.2
-- KILL_SYSTEM_PROCESS_NAMES:            kill_specific_process 拒绝的系统进程名集合
-- SANDBOX_MAX_OUTPUT_CHARS:             沙箱单路（stdout/stderr）输出内存保护上限   默认 5000
-- SANDBOX_ENV_STRIP:                    子进程环境中剔除的代理相关变量集合（防误用代理 Python 环境）
-- SANDBOX_SENSITIVE_ENV_KEYWORDS:       环境变量名含这些关键字即视为敏感，不传入子进程
+Constants provided:
+- MAX_READ_SIZE:                        max read size per view_file call                          default 1MB
+- VIEW_FILE_MAX_SKIP_BYTES:             soft byte limit when skipping in view_file                default 50MB
+- BINARY_SNIFF_BYTES:                   binary sniff head sample bytes                            default 8KB
+- EXCLUDE_DIRS:                         directories excluded from file tools
+- EXCLUDE_FILES:                        files excluded from file tools
+- GLOB_MAX_RESULTS:                     max glob_tool results                                     default 200
+- GLOB_MAX_SCAN:                        max glob_tool entries scanned                             default 5000
+- GREP_MAX_FILES:                       max files searched by grep_tool                           default 5000
+- GREP_MAX_FILE_SIZE:                   per-file size cap for grep_tool                           default 10MB
+- REGEX_MATCH_TIMEOUT_SECONDS:          regex timeout, blocks backtracking blowup                 default 2s
+- GREP_TOTAL_TIMEOUT_SECONDS:           total wall-clock budget for one grep search               default 30s
+- MAX_WRITE_SIZE:                       max write size                                            default 1MB
+- MAX_DIFF_SIZE:                        max diff size                                             default 500
+- CLEAN_MAX_ITEMS:                      max items cleaned per call                                default 500
+- PLAN_MAX_PHASES:                      max plan phases                                           default 12
+- PHASE_VALID_STATUSES:                 valid phase status set
+- PHASE_REQUIRED_FIELDS:                required phase field set
+- PHASE_ALLOWED_UPDATE_FIELDS:          phase fields allowed to update
+- MAX_RESPONSE_LENGTH:                  max response length                                       default 100K
+- MAX_TASKS:                            max fanout tasks, subagent concurrency cap                default 20
+- REQUIRED_TASK_FIELDS:                 required task field set
+- ALLOWED_OPTIONAL_FIELDS:              optional fields, inject a working dir into subagent prompts
+- AVAILABLE_SUBAGENT_PREFIXES:          available subagent prefix set
+- BLACKLIST_PATTERNS:                   bash command blacklist regexes, Seatbelt sandbox is the first line
+- BASH_MAX_OUTPUT_CHARS:                max chars returned to the model per bash stream           default 806
+- KILL_ALLOWED_PORTS:                   whitelisted port ranges for kill, inclusive              default (3000,3100)/(5000,5200)/(8000,8100)
+- KILL_GRACE_SECONDS:                   grace wait after SIGTERM                                 default 3
+- KILL_CONFIRM_SECONDS:                 confirm wait after SIGKILL                                default 2
+- KILL_POLL_INTERVAL:                   exit probe poll interval, seconds                         default 0.2
+- KILL_SYSTEM_PROCESS_NAMES:            system process names refused by kill_specific_process
+- SANDBOX_MAX_OUTPUT_CHARS:             in-memory output cap per sandbox stream                   default 5000
+- SANDBOX_ENV_STRIP:                    agent-related env vars stripped from child processes
+- SANDBOX_SENSITIVE_ENV_KEYWORDS:       sensitive env var keywords, blocked from child processes
+- MAX_QUERY_LENGTH:                     max query length                                          default 500
+- MAX_SEARCH_RESULTS:                   max search results                                        default 20
+- MAX_URL_LENGTH:                       max URL length                                            default 2048
+- MAX_PROMPT_LENGTH:                    max prompt length                                         default 5000
+- SUMMARIZE_LENGTH_THRESHOLD:           summary length threshold                                  default 10K
+- MAX_CONTENT_CHARS:                    max content chars                                         default 100K
+- PAGE_TIMEOUT_MS:                      page timeout                                              default 20s
+- SSRF_BLOCKED_HOSTS:                   hosts blocked against SSRF
 """
 
 # _fs_readonly
@@ -87,8 +95,8 @@ AVAILABLE_SUBAGENT_PREFIXES = ["programmer", "reviewer", "researcher"]
 # _bash
 BLACKLIST_PATTERNS = [
     r"\brm\s+-rf\s+/",
-    r"\brm\b.*--no-preserve-root",  # GNU rm 取消 / 保护：--no-preserve-root / 直删根
-    r"\$[A-Za-z_][A-Za-z0-9_]*\s+-rf\s*/",  # 变量拆词：CMD=rm; $CMD -rf[/] 绕过
+    r"\brm\b.*--no-preserve-root",
+    r"\$[A-Za-z_][A-Za-z0-9_]*\s+-rf\s*/",
     r"\bsudo\b",
     r"\bchmod\s+777",
     r"\bmkfs\.",
@@ -98,7 +106,7 @@ BLACKLIST_PATTERNS = [
     r"\bwget.*\|\s*(\$\(.*\)|(ba)?sh)",
     r"\bbase64\b.*\|\s*(ba)?sh",
     r"\bpython.*-c.*base64.*\|.*sh",
-    r"\$\(\s*(curl|wget)\b",  # 命令替换直接执行网络工具：$(curl evil)
+    r"\$\(\s*(curl|wget)\b",
     r"\bshutdown\b",
     r"\breboot\b",
     r":\(\)\s*\{\s*:\|:&\s*\}\s*;:",
@@ -124,3 +132,13 @@ SANDBOX_SENSITIVE_ENV_KEYWORDS = [
     "API_KEY", "API_SECRET", "TOKEN", "SECRET", "PASSWORD",
     "CREDENTIAL", "PRIVATE_KEY",
 ]
+
+# _web
+MAX_QUERY_LENGTH = 500 
+MAX_SEARCH_RESULTS = 20
+MAX_URL_LENGTH = 2048
+MAX_PROMPT_LENGTH = 5000
+SUMMARIZE_LENGTH_THRESHOLD = 10_000
+MAX_CONTENT_CHARS = 100_000
+PAGE_TIMEOUT_MS = 20_000
+SSRF_BLOCKED_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"})

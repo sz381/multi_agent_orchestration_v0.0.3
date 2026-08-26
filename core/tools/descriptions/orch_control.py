@@ -1,9 +1,9 @@
-"""编排控制工具集合（_orch_control）的工具描述
+"""Tool descriptions for the orchestration control toolset (_orch_control).
 
-工具表述包括:
-- end_orchestration                 结束当前编排
-- pause_orchestration               暂停当前编排
-- fanout_subagents                  派遣子代理
+Tools described:
+- end_orchestration      end the current orchestration
+- pause_orchestration    pause the current orchestration
+- fanout_subagents       dispatch subagents
 """
 
 TOOL_DESCRIPTION = {

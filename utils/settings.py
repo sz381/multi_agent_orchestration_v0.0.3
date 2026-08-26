@@ -1,16 +1,17 @@
-"""应用配置模块，基于 pydantic-settings 从 .env 文件加载。
+"""Application configuration module, loaded from .env via pydantic-settings.
 
-提供：
-- settings 单例：全局配置入口，所有字段均有合理默认值
-- setup_langsmith_tracing()：启动时一次性接入 LangSmith 追踪
+Provides:
+- settings singleton:         global config entry, all fields have sensible defaults
+- setup_langsmith_tracing():  one-time LangSmith tracing setup at startup
 
-关键约束：
-- 配置字段名与 .env 键名严格对应，字段均可被 .env 覆盖
-- extra="forbid"：禁止未声明字段，尽早暴露拼写错误
+Key constraints:
+- config field names strictly map to .env keys, every field can be overridden by .env
+- extra="forbid": reject undeclared fields, surface typos early
 
-使用注意：
-- 配置在模块导入时即实例化，修改 .env 后需重启进程生效
-- setup_langsmith_tracing() 幂等，仅当 langsmith_tracing 与 langsmith_api_key 同时配置时才会生效
+Usage notes:
+- config is instantiated at module import; restart the process after editing .env
+- setup_langsmith_tracing() is idempotent, only effective when both
+  langsmith_tracing and langsmith_api_key are configured
 """
 
 import logging
@@ -26,7 +27,7 @@ _logger = structlog.get_logger(__name__)
 
 class Settings(BaseSettings):
     """
-    全局应用配置类
+    Global application settings class.
     """
     model_config = SettingsConfigDict(
         env_file=Path(__file__).parent.parent / ".env",
@@ -65,7 +66,7 @@ _langsmith_initialized = False
 
 def setup_langsmith_tracing() -> None:
     """
-    将 LangSmith 配置注入环境变量，完成启动期追踪接入。
+    Inject LangSmith config into environment variables, completing startup tracing setup.
     """
     global _langsmith_initialized
 

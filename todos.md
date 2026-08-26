@@ -86,6 +86,33 @@
   - `httpx.AsyncClient` + `AsyncOpenAI`（真异步）。
   - **需求**：`fetch_web` 抓取内容后，若超过 1 万 chars，用 **secondary model** 对内容做精简（LLM 调用）再返回。
   - 细节待定：抓取实现、阈值常量、精简 prompt、工具内嵌 LLM 调用的确定性与测试策略（后续讨论）。
+  - **`web_search` 首轮修复已完成（2026-08-13）**：
+    - 校验全部前移到 async 外壳（事件循环）：补 query 非 str / max_results 非 int（bool 排除）/ domains 非 list[str] 类型校验；clamp 留外壳；互斥校验保留。
+    - `_web_search_sync` 瘦身为纯网络 I/O（DDG + 域名过滤 + Tavily fallback），docstring 标注"禁止在事件循环线程直接调用"。
+    - 死代码清理：删 `import atexit`/`import ipaddress`；16 处尾随空格清零；三个占位 docstring + 文件头约束全部补全。
+    - 保留 web_fetch 预留 import（ChatOpenAI/crawl4ai/WEB_SUMMARIZE_TEMPLATE，依赖已装可加载）。
+    - 手动验证：8 校验分支全 error JSON、clamp 0→1、真实 DDG 搜索 5 条、白/黑名单过滤生效；全量回归 814 passed。
+  - **`web_search` 测试文件已完成（2026-08-13）**：tests/test_web_web_search.py，37 用例全绿（1.0s）。
+    - 全程 mock 不触网：DDGS/TavilyClient 同步 fake（_web_search_sync 在线程池同步调用，无需 AsyncMock），settings.tavily_api_key 用 monkeypatch 控制降级分支。
+    - 校验类 autouse fixture 断言 last_call is None：校验失败不得发起任何搜索请求（防校验漏洞偷偷触网）。
+    - 覆盖：校验 17（类型/长度/互斥/bool 排除）+ clamp 3（text 放大 3 倍参数断言）+ DDG 主路径 2 + 域名过滤 3（含 notgithub.com 负例）+ 降级链 3 + 纯函数 9。无并发用例（用户拍板：provider 能力稍测即可）。
+    - **`web_fetch` 测试已完成（2026-08-21）**：tests/test_web_web_fetch.py，44 用例全绿（0.4s）。
+    - 全程 mock 不触网：conftest 新增 `fake_crawler`（真异步 arun，返回 (fit, raw) markdown 可配置）
+      与 `fake_tavily`（补 extract 方法，与 web_search 共用 TavilyClient fake）；settings.tavily_api_key
+      用 monkeypatch 控制回退分支；`_summarize_with_llm` 用 monkeypatch 固定摘要结果。
+    - 覆盖：校验 17（url/prompt 类型+长度+协议+SSRF，autouse fixture 断言校验失败不触网）
+      + 主路径 3（短内容直返/raw 回退/长内容摘要）+ 回退链 6（无 key 短路/extract 成功/无结果/
+      空内容/双失败合并/长内容摘要）+ 摘要纯逻辑 2 + `_is_private_url` 纯函数 9 参数。
+    - 至此第四批 web_search + web_fetch 实现与测试全部完成（search 37 + fetch 44 = 81 用例）。
+  - **`web_fetch` 回退路径假 async 已修（2026-08-21）**：
+    - `_fallback_fetch` 内 `TavilyClient.extract` 为同步阻塞网络调用（无异步 API），
+      在 async 壳内直接调用会卡死事件循环——与本文核心教训同一问题（搜索路径当初
+      已用 to_thread 修过，fetch 回退路径漏了）→ 整体包 `asyncio.to_thread`，
+      与 web_search 同一范式，docstring 补执行模型说明。
+    - 实测：extract 0.5s 慢调用与 0.1s 快任务并发，快任务先完成（事件循环不阻塞）；
+      无 key/空结果/空内容错误分支不变；全量回归 851 绿。
+    - 教训：**新写 async 工具时所有内部同步库调用点都要过一遍 to_thread 检查**（ddgs/tavily
+      均无异步 API），不能只修主路径漏回退路径。
 - **第五批（收尾）跨工具真实并发测试**：
   - 兑现记忆"并发测试延后"承诺：read-write 竞争、write-write 冲突（同文件锁串行化验证）、跨工具并发（bash + 写文件同时跑）。
   - 全 async 后并发模型锁定"单事件循环"，`asyncio.Lock` 语义确定，可真实交错测试。

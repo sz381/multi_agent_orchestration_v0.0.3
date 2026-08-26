@@ -1,9 +1,10 @@
-"""系统提示词
+""" System Prompt
 
-此提示词用于 fetch_web 工具的 secondary model
-触发条件：当 fetch 的页面内容超过 某个threshold 个字符时，触发 secondary model 对 input prompt 进行削减
+This prompt is used for the secondary model of the web_fetch tool.
+Trigger condition: When the fetched page content exceeds a certain threshold 
+(in terms of number of characters), the secondary model will reduce the input prompt.
 
-提供
+Provide
 - WEB_SUMMARIZE_TEMPLATE:       web page summarization template
 """
 

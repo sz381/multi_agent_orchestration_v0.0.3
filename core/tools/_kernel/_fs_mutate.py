@@ -1,37 +1,53 @@
-"""工作区写入文件系统工具实现
+"""Workspace write filesystem tools implementation.
 
-提供函数：
-- str_replace:      原子替换文件中的精确文本（CAS 语义，old_str 须唯一或 replace_all）
-- write_file:       原子创建或覆盖文件（自动建父目录，新文件权限随 umask）
-- clean_dir:        安全地删除工作区内的文件或目录, 注意是 工作区 only
+Provides:
+- str_replace:  atomically replace exact text in a file (CAS semantics, old_str must be unique or replace_all)
+- write_file:   atomically create or overwrite a file (parent dirs auto-created, new file mode follows umask)
+- clean_dir:    safely delete files or directories inside the workspace, workspace only
 
-关键约束：
-- 所有工具统一返回 JSON 字符串（status: ok/error），不抛异常
-  （唯一例外：workspace 未配置时抛 RuntimeError，属配置错误而非业务错误）
-- 路径严格限制在工作区内（无越界开关）：realpath 归一化 + 边界前缀检查，
-  与 _fs_readonly 共享同一安全链；clean_dir 另有工作区根保护
-- 写入原子性：mkstemp 同目录临时文件 + 权限恢复 + os.replace（inode 替换），
-  finally 兜底清理临时文件，任何失败不留下半写文件
-- 并发互斥：按 realpath 路径缓存的 asyncio.Lock（WeakValueDictionary）三工具共享，
-  clean_dir 删除前逐项获取同一文件锁，与写入/替换互斥（防“删了又复活”）；
-  目录删除先原子改名隔离再递归删除（防删除期间新写入被误删）
-- 资源硬上限：MAX_WRITE_SIZE（content 1MB 字节语义）、MAX_DIFF_SIZE（diff 50 字符截断）、
-  CLEAN_MAX_ITEMS（单次删除 500 项，先预检后动手）
-- 编码防护：无效编码（LookupError/TypeError）与不可编码字符（UnicodeEncodeError）
-  均在写盘前拦截，不产生半写文件
-- 幂等语义：write_file 内容与原文一致时返回 [UNCHANGED] 不落盘；
-  原文件 ≤1MB 才全读比较，更大跳过读取直接覆盖（字节数必不同）；
-  原内容不可知时 diff.old 为空（读失败/stat 失败/超限），不阻塞写入
-- 删除不可回滚：clean_dir 部分失败时 error 响应携带 deleted/count 报告已删进度
+Key constraints:
+- all tools return JSON strings with status ok or error and never raise,
+  except one case: a missing workspace raises RuntimeError, a config
+  error rather than a business error
+- paths are strictly confined to the workspace (no escape switch):
+  realpath normalization plus a boundary prefix check, sharing the same
+  safety chain as _fs_readonly; clean_dir additionally protects the
+  workspace root
+- write atomicity: mkstemp temp file in the same directory plus mode
+  restore plus os.replace (inode swap); finally cleans up the temp
+  file, no failure ever leaves a half-written file
+- concurrency: per-path asyncio.Lock cached by realpath in a
+  WeakValueDictionary, shared by all three tools; clean_dir takes the
+  same per-item locks before deleting, mutually excluding writes and
+  replaces (prevents delete-then-resurrect); directory deletion first
+  atomically renames it away, then recursively deletes (prevents new
+  writes during deletion from being removed by mistake)
+- hard resource limits: MAX_WRITE_SIZE (1MB content, byte semantics),
+  MAX_DIFF_SIZE (50-char diff truncation), CLEAN_MAX_ITEMS (500 items
+  per call, precheck before acting)
+- encoding guard: invalid encodings (LookupError/TypeError) and
+  unencodable characters (UnicodeEncodeError) are intercepted before
+  touching the disk, no half-written files
+- idempotency: write_file returns [UNCHANGED] without writing when the
+  content matches the original; the original is fully read for
+  comparison only when <= 1MB, larger files skip the read and are
+  overwritten directly (byte counts must differ); diff.old is empty
+  when the original content is unknown (read/stat failure or size cap),
+  never blocking the write
+- deletion is not rollback-able: on partial failure the error response
+  carries deleted/count reporting the progress
 
-使用注意：
-- str_replace 的 old_str 是精确匹配，多处出现时须 replace_all=True，否则报错
-- write_file 的 content 必须是字符串（空串合法=写空文件），大小按字节计
-- clean_dir 的 patterns 只匹配文件名/目录名（fnmatch basename 语义），
-  不支持 ** 与路径分隔符；None/[] 时递归删除 dir_path 整体（文件则删文件）
-- clean_dir 删除的是链接本身而非链接指向的目标
-- 编码错误提示会回传异常信息，帮助定位问题
-- 只读工具请使用 _fs_readonly
+Usage notes:
+- str_replace old_str is an exact match; multiple occurrences require
+  replace_all=True, otherwise an error is returned
+- write_file content must be a string (empty string is legal, writing
+  an empty file); size is measured in bytes
+- clean_dir patterns match file/dir names only (fnmatch basename
+  semantics), no ** and no path separators; None/[] deletes dir_path
+  recursively as a whole (a file target deletes the file)
+- clean_dir deletes the link itself, never what the link points to
+- encoding errors echo the exception detail to help diagnose
+- read-only tools live in _fs_readonly
 """
 
 import os
@@ -51,22 +67,24 @@ from core.tools._kernel.constants import (
 from utils.settings import settings
 
 
-# 弱引用字典，用于存储每个文件的异步锁，防止锁对象因无引用而被垃圾回收。
+# weakref dict holding a per-file async lock, so locks are garbage
+# collected once no coroutine holds a reference
 _file_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 _clean_lock = asyncio.Lock()
 
 
 def _get_file_lock(file_path: str) -> asyncio.Lock:
-    """返回一个按文件异步锁，用于对同一路径的写入进行序列化。
+    """Return a per-file async lock serializing writes to the same path.
 
-    使用 WeakValueDictionary，当没有协程持有该锁的引用时，
-    锁将被垃圾回收，防止在长时间运行会话中出现无限制的增长。
+    A WeakValueDictionary is used so a lock is garbage collected once no
+    coroutine holds a reference, preventing unbounded growth in a
+    long-running session.
 
     Args:
-        file_path: 文件绝对路径（已归一化），作为锁的标识键。
+        file_path: absolute file path (already normalized), the lock key.
 
     Returns:
-        该路径对应的 asyncio.Lock 实例。
+        the asyncio.Lock instance for that path.
     """
     lock = _file_locks.get(file_path)
     if lock is None:
@@ -82,25 +100,30 @@ def _str_replace_io(
     replace_all: bool,
     encoding: str,
 ) -> str:
-    """锁内临界区同步段：字节预检 → 读取 → 匹配 → 原子替换，返回 JSON。
+    """Lock-critical-section sync segment: byte precheck, read, match,
+    atomic replace, return JSON.
 
-    由 str_replace 持有路径锁时经 asyncio.to_thread 调用，磁盘 I/O 与文本
-    计算在线程池执行，事件循环不被阻塞。本函数不负责加锁，只假定调用方
-    已保证同一路径互斥（临界区整体原子执行，mkstemp→write→chmod→replace
-    序列不可拆分）。
+    Called by str_replace via asyncio.to_thread while holding the path
+    lock, so disk IO and text processing run in a thread pool and never
+    block the event loop. This function does not take the lock itself;
+    it assumes the caller guarantees mutual exclusion on the same path
+    (the critical section runs atomically as a whole, the
+    mkstemp, write, chmod, replace sequence must not be split).
 
     Args:
-        file_path:   目标文件路径（已通过安全链校验的工作区内绝对路径）。
-        old_str:     要替换的精确文本（必须连空白字符完全匹配）。
-        new_str:     替换后的文本（空串合法，表示删除）。
-        replace_all: 是否替换所有出现位置。
-        encoding:    文件编码。
+        file_path:   target file path, workspace-internal absolute path validated by the safety chain.
+        old_str:     exact text to replace, whitespace included, must match exactly.
+        new_str:     replacement text (empty string is legal, meaning deletion).
+        replace_all: whether to replace every occurrence.
+        encoding:    file encoding.
 
     Returns:
-        JSON 字符串，包含 status、path 与 diff 摘要。
+        JSON string with status, path and a diff summary.
     """
-    # 字节级大小预检：多字节编码下字符数恒 ≤ 字节数，字符级检查会被
-    # 大文件（如 2MB 中文）绕过；getsize 是字节语义，与限制严格一致
+    # byte-level size precheck: in multibyte encodings the char count is
+    # always <= the byte count, so a char-level check could be bypassed by
+    # a large file (e.g. 2MB of Chinese); getsize is byte semantics,
+    # exactly matching the limit
     try:
         file_size = os.path.getsize(file_path)
     except OSError as exc:
@@ -109,14 +132,14 @@ def _str_replace_io(
             "message": f"Cannot stat {file_path}: {exc}"
         }, ensure_ascii=False)
 
-    # 文件大小检查，确保文件大小不超过限制
+    # size check: the file must not exceed the limit
     if file_size > MAX_WRITE_SIZE:
         return json.dumps({
             "status": "error",
             "message": f"File '{file_path}' exceeds {MAX_WRITE_SIZE // 1024 // 1024}MB limit."
         }, ensure_ascii=False)
 
-    # 大小已确认 ≤ 1MB 字节，完整读取不会内存超载
+    # size is confirmed <= 1MB bytes, a full read cannot overload memory
     try:
         with open(file_path, "r", encoding=encoding) as f:
             content = f.read()
@@ -135,14 +158,14 @@ def _str_replace_io(
             "status": "error",
             "message": f"Cannot read {file_path}: {exc}"
         }, ensure_ascii=False)
-    # 意外异常兜底：不裸炸整个调用（与 _fs_readonly 同一策略）
+    # unexpected exception fallback: never abort the whole call (same policy as _fs_readonly)
     except Exception as exc:
         return json.dumps({
             "status": "error",
             "message": f"Unexpected error reading {file_path}: {exc}"
         }, ensure_ascii=False)
 
-    # 文本匹配检查，确保 old_str 在文件中存在
+    # match check: old_str must exist in the file
     count = content.count(old_str)
     if count == 0:
         return json.dumps({
@@ -150,8 +173,9 @@ def _str_replace_io(
             "message": f"Text not found in {file_path}. Use view_file to verify file content."
         }, ensure_ascii=False)
 
-    # 特殊情况检查，如果 old_str 和 new_str 相同，则无需进行任何操作
-    # 响应契约与正常替换一致：携带 path 与同结构 diff（count 为实际出现次数）
+    # special case: old_str and new_str identical, nothing to do; the
+    # response contract matches a normal replace (path plus the same diff
+    # shape, count is the actual occurrence count)
     if old_str == new_str:
         return json.dumps({
             "status": "ok",
@@ -165,32 +189,34 @@ def _str_replace_io(
             },
         }, ensure_ascii=False)
 
-    # 特殊情况检查，如果 old_str 出现多次且未设置 replace_all，则报错
+    # special case: multiple occurrences without replace_all, reject
     if count > 1 and not replace_all:
         return json.dumps({
             "status": "error",
             "message": f"Text matches {count} occurrences in {file_path}. Add more context to make it unique, or use replace_all=True."
         }, ensure_ascii=False)
 
-    # 生成替换后的内容：replace_all 全量替换，否则只替换第一次出现
+    # build the new content: replace_all replaces every occurrence, otherwise only the first
     if replace_all:
         new_content = content.replace(old_str, new_str)
     else:
         new_content = content.replace(old_str, new_str, 1)
 
-    # 创建临时文件（与目标同目录，保证 os.replace 同文件系统原子性）
-    # mkstemp / os.stat 均可能抛 OSError（目录只读、文件被并发删除等），必须纳入兜底
+    # create the temp file in the same directory as the target, so
+    # os.replace stays atomic on one filesystem
+    # mkstemp / os.stat may raise OSError (read-only dir, file deleted
+    # concurrently, etc.), must be covered by the fallback
     tmp_path: str | None = None
     try:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(file_path))
-        # 保存原文件权限，以便恢复
+        # save the original mode for restore
         orig_mode = os.stat(file_path).st_mode
-        # 写入临时文件
+        # write the temp file
         with os.fdopen(tmp_fd, "w", encoding=encoding) as f:
             f.write(new_content)
-        # 恢复原文件权限
+        # restore the original mode
         os.chmod(tmp_path, orig_mode)
-        # 原子性地替换原文件
+        # atomically replace the original
         os.replace(tmp_path, file_path)
     except UnicodeEncodeError:
         return json.dumps({
@@ -202,22 +228,24 @@ def _str_replace_io(
             "status": "error",
             "message": f"Cannot write to {file_path}: {exc}"
         }, ensure_ascii=False)
-    # 意外异常兜底：写入阶段失败不裸炸（finally 仍会清理临时文件）
+    # unexpected exception fallback: a write-phase failure never aborts
+    # (finally still cleans the temp file)
     except Exception as exc:
         return json.dumps({
             "status": "error",
             "message": f"Unexpected error writing {file_path}: {exc}"
         }, ensure_ascii=False)
     finally:
-        # 删除临时文件（mkstemp 失败时 tmp_path 为 None，跳过）
+        # clean up the temp file (None when mkstemp failed, skip)
         if tmp_path is not None and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
-            # 删除文件失败，但已无其他异常，忽略并继续，不能因为这个导致整个替换失败
+            # unlink failure is ignored: no other exception is pending, and
+            # one cleanup error must not fail the whole replace
             except OSError:
                 pass
 
-    # 返回结果
+    # return the result
     return json.dumps({
         "status": "ok",
         "message": f"[REPLACED{' ALL' if replace_all else ''}] {file_path}"
@@ -239,49 +267,54 @@ async def str_replace(
     replace_all: bool = False,
     encoding: str = "utf-8",
 ) -> str:
-    """原子性地替换文件中的精确文本。
+    """Atomically replace exact text in a file.
 
-    要求 old_str 在文件中恰好匹配一次（或设置 replace_all=True）。
+    old_str must occur exactly once in the file (or replace_all=True).
 
     Args:
-        file_path:   目标文件路径（工作区相对路径或绝对路径）。
-        old_str:     要替换的精确文本（必须连空白字符完全匹配）。
-        new_str:     替换后的文本。
-        replace_all: 是否替换所有出现位置（默认 False）。
-        encoding:    文件编码（默认 utf-8）。
+        file_path:   target file path (workspace-relative or absolute).
+        old_str:     exact text to replace, whitespace included, must match exactly.
+        new_str:     replacement text.
+        replace_all: whether to replace every occurrence (default False).
+        encoding:    file encoding (default utf-8).
 
     Returns:
-        JSON 字符串，包含 status、path 与 diff 摘要。
+        JSON string with status, path and a diff summary.
 
-    执行模型：参数校验与路径安全检查在事件循环内完成（纯 CPU）；
-    锁内临界区（磁盘 I/O 与文本处理）经 asyncio.to_thread 在线程池执行，
-    事件循环不被阻塞；路径锁（asyncio.Lock）的获取与释放在事件循环内完成。
+    Execution model: argument validation and path safety checks run on
+    the event loop (pure CPU); the lock-critical section (disk IO and
+    text processing) runs in a thread pool via asyncio.to_thread; the
+    path lock (asyncio.Lock) is acquired and released on the event loop.
     """
-    # 参数检查：file_path 必须是非空字符串
-    # 非 str（如数字）会在 strip() 处 AttributeError 裸炸，LLM 传参不可信必须拦截
+    # validate file_path: non-empty string
+    # a non-str value (e.g. a number) would blow up with AttributeError at
+    # strip(), LLM arguments are untrusted and must be intercepted
     if not isinstance(file_path, str) or not file_path.strip():
         return json.dumps({
             "status": "error",
             "message": "file_path must be a non-empty string."
         }, ensure_ascii=False)
 
-    # 参数检查：old_str 必须是非空字符串
-    # 注意只查空不 strip：替换空白/缩进是合法需求（与正则 pattern 语义不同）
+    # validate old_str: non-empty string
+    # note: only emptiness is checked, no strip, replacing whitespace or
+    # indentation is a legitimate use (unlike regex pattern semantics)
     if not isinstance(old_str, str) or not old_str:
         return json.dumps({
             "status": "error",
             "message": "old_str must be a non-empty string."
         }, ensure_ascii=False)
 
-    # 参数检查：new_str 必须是字符串（空串合法，表示删除；None/数字会在 replace() 处 TypeError 裸炸）
+    # validate new_str: must be a string (empty is legal, meaning deletion;
+    # None/numbers would raise TypeError at replace())
     if not isinstance(new_str, str):
         return json.dumps({
             "status": "error",
             "message": "new_str must be a string."
         }, ensure_ascii=False)
 
-    # 参数检查：encoding 是否有效
-    # 注意非字符串 encoding（None/数字）会抛 TypeError 而非 LookupError，必须一并拦截
+    # validate encoding
+    # note: a non-string encoding (None/number) raises TypeError, not
+    # LookupError, intercept both
     try:
         "".encode(encoding)
     except (LookupError, TypeError):
@@ -290,13 +323,13 @@ async def str_replace(
             "message": f"Unknown encoding: '{encoding}'. Try 'utf-8', 'gbk', or 'latin-1'."
         }, ensure_ascii=False)
 
-    # 获取工作区目录，确保其存在并为绝对路径，注意！这是个极其严重的问题，工作区必须设置，如果未设置则必须立即报错！
+    # get the workspace directory; this is a hard requirement, fail fast when missing
     workspace = settings.workspace_dir
     if not workspace:
         raise RuntimeError("WORKSPACE_DIR is not configured, please set it up.")
     workspace = os.path.abspath(workspace)
 
-    # 在 abspath 基础上，递归解析所有符号链接，返回磁盘上的真实路径
+    # resolve all symlinks on top of abspath, returning the real path on disk
     try:
         safe_root = os.path.realpath(workspace)
     except Exception as exc:
@@ -305,10 +338,10 @@ async def str_replace(
             "message": f"Cannot resolve workspace: {exc}"
         }, ensure_ascii=False)
 
-    # 解析用户主目录
+    # expand the user home directory
     file_path = os.path.expanduser(file_path)
 
-    # 解析文件路径，确保其为绝对路径
+    # resolve the file path to an absolute one
     try:
         if not os.path.isabs(file_path):
             file_path = os.path.realpath(os.path.join(safe_root, file_path))
@@ -320,32 +353,34 @@ async def str_replace(
             "message": f"Invalid path: {exc}"
         }, ensure_ascii=False)
 
-    # 路径边界归一化，把工作区根统一成 恰好一个结尾分隔符 的格式，防止前缀匹配陷阱。
+    # normalize the boundary: the workspace root ends with exactly one
+    # separator, preventing prefix-match traps
     safe_root = safe_root.rstrip(os.sep) + os.sep
-    
-    # 路径越界检查，确保 file_path 在工作区目录下
+
+    # boundary check: file_path must stay inside the workspace
     if not file_path.startswith(safe_root):
         return json.dumps({
             "status": "error",
             "message": f"Access to '{file_path}' is denied."
         }, ensure_ascii=False)
 
-    # 文件存在性检查，确保 file_path 指向的文件存在
+    # existence check: file_path must exist
     if not os.path.exists(file_path):
         return json.dumps({
             "status": "error",
             "message": f"File '{file_path}' does not exist."
         }, ensure_ascii=False)
 
-    # 文件类型检查，确保 file_path 指向的不是目录
+    # type check: file_path must not be a directory
     if os.path.isdir(file_path):
         return json.dumps({
             "status": "error",
             "message": f"'{file_path}' is a directory."
         }, ensure_ascii=False)
 
-    # 在持有文件锁的情况下，将锁内临界区（字节预检/读取/匹配/原子替换）整体
-    # 丢入线程池执行，事件循环不被磁盘 I/O 阻塞；锁的获取与释放在事件循环内完成
+    # hold the file lock and run the whole critical section (byte precheck,
+    # read, match, atomic replace) in a thread pool, keeping disk IO off the
+    # event loop; the lock is acquired and released on the event loop
     async with _get_file_lock(file_path):
         return await asyncio.to_thread(
             _str_replace_io, file_path, old_str, new_str, replace_all, encoding
@@ -357,53 +392,63 @@ def _write_file_io(
     content: str,
     encoding: str,
 ) -> str:
-    """锁内临界区同步段：存在性检查 → 读取旧内容 → UNCHANGED 判断 → 原子写，返回 JSON。
+    """Lock-critical-section sync segment: existence check, read old
+    content, UNCHANGED decision, atomic write, return JSON.
 
-    由 write_file 持有路径锁时经 asyncio.to_thread 调用，磁盘 I/O 在线程池
-    执行，事件循环不被阻塞。本函数不负责加锁，只假定调用方已保证同一路径互斥。
+    Called by write_file via asyncio.to_thread while holding the path
+    lock, so disk IO runs in a thread pool and never blocks the event
+    loop. This function does not take the lock itself; it assumes the
+    caller guarantees mutual exclusion on the same path.
 
     Args:
-        file_path: 目标文件路径（已通过安全链校验的工作区内绝对路径）。
-        content:   完整文件内容（最大 1MB）。
-        encoding:  文件编码。
+        file_path: target file path, workspace-internal absolute path validated by the safety chain.
+        content:   full file content (max 1MB).
+        encoding:  file encoding.
 
     Returns:
-        JSON 字符串，包含 status、path 与 diff 摘要。
+        JSON string with status, path and a diff summary.
     """
-    # 文件存在性检查，如果存在则读取原内容
+    # existence check: read the original content when present
     existed = os.path.exists(file_path)
     old_content = ""
-    # 读原文件失败的标记：失败时不做 UNCHANGED 判断（old 为空 ≠ 原文件为空）
+    # read-failure flag: on failure skip the UNCHANGED decision (an empty
+    # old != an empty original)
     read_failed = False
 
-    # 如果文件存在则读取原内容（仅用于 diff 与 UNCHANGED 判断）
+    # read the original when the file exists (only for diff and the UNCHANGED decision)
     if existed:
-        # 存在性检查，确保 file_path 不是目录
+        # existence check: file_path must not be a directory
         if os.path.isdir(file_path):
             return json.dumps({
                 "status": "error",
                 "message": f"'{file_path}' is a directory."
             }, ensure_ascii=False)
 
-        # 字节级预检：原文件 ≤ 1MB 字节才读取（供 UNCHANGED 比较与 diff.old）；
-        # 更大则跳过读取直接覆盖——content 编码后必 ≤ MAX_WRITE_SIZE，字节数
-        # 必然不同，且省去大文件全读；read_failed 语义扩展为“原内容不可知”
+        # byte-level precheck: read the original only when <= 1MB bytes
+        # (for the UNCHANGED comparison and diff.old); larger files skip
+        # the read and are overwritten directly, the encoded content is
+        # always <= MAX_WRITE_SIZE so byte counts must differ, and a full
+        # read of a huge file is saved; read_failed expands to "original
+        # content unknown"
         try:
             old_size = os.path.getsize(file_path)
         except OSError:
-            # stat 失败：原内容不可知，保守走覆盖，且不误判 UNCHANGED
+            # stat failed: original unknown, conservatively overwrite and
+            # never claim UNCHANGED
             old_size = None
         if old_size is None or old_size > MAX_WRITE_SIZE:
             read_failed = True
         else:
-            # 读失败不阻塞写入：diff.old 是装饰性信息，覆盖不可解码/二进制文件是合法操作
+            # a read failure never blocks the write: diff.old is decorative,
+            # overwriting an undecodable/binary file is legal
             try:
                 with open(file_path, "r", encoding=encoding) as f:
                     old_content = f.read()
             except Exception:
                 read_failed = True
 
-    # 如果文件存在且内容未变，则返回未修改（响应契约与主分支一致：path + diff）
+    # file exists and content unchanged: return UNCHANGED (response
+    # contract matches the main branch: path + diff)
     if existed and not read_failed and old_content == content:
         return json.dumps({
             "status": "ok",
@@ -415,28 +460,31 @@ def _write_file_io(
             },
         }, ensure_ascii=False)
 
-    # 原子写：mkstemp 同目录（保证 os.replace 同文件系统原子性）
-    # mkstemp / os.stat / os.umask 均可能抛 OSError，必须纳入兜底
+    # atomic write: mkstemp in the same directory (keeps os.replace
+    # atomic on one filesystem)
+    # mkstemp / os.stat / os.umask may raise OSError, must be covered
     tmp_path: str | None = None
     try:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(file_path))
-        # 权限：覆盖保留原权限；新建按 0o666 & ~umask（mkstemp 固定 0600，
-        # 不修正会导致新文件其他用户/进程不可读；umask 仅在锁内读取，竞态窗口可接受）
+        # mode: overwrite keeps the original; new files use 0o666 & ~umask
+        # (mkstemp fixes 0600, leaving it would make the new file unreadable
+        # to other users/processes; umask is read inside the lock, the race
+        # window is acceptable)
         if existed:
             orig_mode = os.stat(file_path).st_mode
         else:
             old_umask = os.umask(0)
             os.umask(old_umask)
             orig_mode = 0o666 & ~old_umask
-        # 写入临时文件
+        # write the temp file
         with os.fdopen(tmp_fd, "w", encoding=encoding) as f:
             f.write(content)
-        # 恢复权限
+        # restore the mode
         os.chmod(tmp_path, orig_mode)
-        # 原子性地替换原文件
+        # atomically replace the original
         os.replace(tmp_path, file_path)
     except UnicodeEncodeError:
-        # 理论不可达（已提前预检编码），保留防御
+        # theoretically unreachable (encoding prechecked), kept as defense
         return json.dumps({
             "status": "error",
             "message": f"Content contains characters not encodable as {encoding}. Try encoding='utf-8'."
@@ -446,21 +494,22 @@ def _write_file_io(
             "status": "error",
             "message": f"Cannot write to {file_path}: {exc}"
         }, ensure_ascii=False)
-    # 意外异常兜底：写入阶段失败不裸炸（finally 仍会清理临时文件）
+    # unexpected exception fallback: a write-phase failure never aborts
+    # (finally still cleans the temp file)
     except Exception as exc:
         return json.dumps({
             "status": "error",
             "message": f"Unexpected error writing {file_path}: {exc}"
         }, ensure_ascii=False)
     finally:
-        # 删除临时文件（mkstemp 失败时 tmp_path 为 None，跳过）
+        # clean up the temp file (None when mkstemp failed, skip)
         if tmp_path is not None and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
 
-    # 计算行数，决定 action，返回响应
+    # count lines, decide the action, return the response
     line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
     action = "OVERWRITTEN" if existed else "CREATED"
     return json.dumps({
@@ -479,39 +528,45 @@ async def write_file(
     content: str,
     encoding: str = "utf-8",
 ) -> str:
-    """原子性地创建或覆盖文件。
+    """Atomically create or overwrite a file.
 
-    按需自动创建父目录。
+    Parent directories are created on demand.
 
     Args:
-        file_path: 目标文件路径（工作区相对路径或绝对路径）。
-        content:   完整文件内容（最大 1MB）。
-        encoding:  文件编码（默认 utf-8）。
+        file_path: target file path (workspace-relative or absolute).
+        content:   full file content (max 1MB).
+        encoding:  file encoding (default utf-8).
 
     Returns:
-        JSON 字符串，包含 status、path 与 diff 摘要。
+        JSON string with status, path and a diff summary.
 
-    执行模型：参数校验、路径安全检查与父目录创建（to_thread）在事件循环内发起；
-    锁内临界区（存在性检查/读取旧内容/UNCHANGED 判断/原子写）经 asyncio.to_thread
-    在线程池执行，事件循环不被阻塞；路径锁（asyncio.Lock）的获取与释放在事件循环内完成。
+    Execution model: argument validation, path safety checks and parent
+    directory creation (to_thread) are initiated on the event loop; the
+    lock-critical section (existence check, read old content, UNCHANGED
+    decision, atomic write) runs in a thread pool via asyncio.to_thread;
+    the path lock (asyncio.Lock) is acquired and released on the event
+    loop.
     """
-    # 参数检查：file_path 必须是非空字符串
-    # 非 str（如数字）会在 strip() 处 AttributeError 裸炸，LLM 传参不可信必须拦截
+    # validate file_path: non-empty string
+    # a non-str value (e.g. a number) would blow up with AttributeError at
+    # strip(), LLM arguments are untrusted and must be intercepted
     if not isinstance(file_path, str) or not file_path.strip():
         return json.dumps({
             "status": "error",
             "message": "file_path must be a non-empty string."
         }, ensure_ascii=False)
 
-    # 参数检查：content 必须是字符串（空串合法，表示写空文件；None/0/False/[] 会静默写空文件或裸炸）
+    # validate content: must be a string (empty is legal, writing an empty
+    # file; None/0/False/[] would silently write an empty file or blow up)
     if not isinstance(content, str):
         return json.dumps({
             "status": "error",
             "message": "content must be a string."
         }, ensure_ascii=False)
 
-    # 参数检查：encoding 是否有效
-    # 注意非字符串 encoding（None/数字）会抛 TypeError 而非 LookupError，必须一并拦截
+    # validate encoding
+    # note: a non-string encoding (None/number) raises TypeError, not
+    # LookupError, intercept both
     try:
         "".encode(encoding)
     except (LookupError, TypeError):
@@ -520,13 +575,13 @@ async def write_file(
             "message": f"Unknown encoding: '{encoding}'. Try 'utf-8', 'gbk', or 'latin-1'."
         }, ensure_ascii=False)
 
-    # 获取工作区目录，确保其存在并为绝对路径，注意！这是个极其严重的问题，工作区必须设置，如果未设置则必须立即报错！
+    # get the workspace directory; this is a hard requirement, fail fast when missing
     workspace = settings.workspace_dir
     if not workspace:
         raise RuntimeError("WORKSPACE_DIR is not configured, please set it up.")
     workspace = os.path.abspath(workspace)
 
-    # 在 abspath 基础上，递归解析所有符号链接，返回磁盘上的真实路径
+    # resolve all symlinks on top of abspath, returning the real path on disk
     try:
         safe_root = os.path.realpath(workspace)
     except Exception as exc:
@@ -535,10 +590,10 @@ async def write_file(
             "message": f"Cannot resolve workspace: {exc}"
         }, ensure_ascii=False)
 
-    # 展开用户主目录
+    # expand the user home directory
     file_path = os.path.expanduser(file_path)
 
-    # 确保 file_path 是绝对路径，如果相对路径则解析为绝对路径
+    # ensure an absolute path, resolve relative ones
     try:
         if not os.path.isabs(file_path):
             file_path = os.path.realpath(os.path.join(safe_root, file_path))
@@ -550,17 +605,18 @@ async def write_file(
             "message": f"Invalid path: {exc}"
         }, ensure_ascii=False)
 
-    # 路径边界归一化，把工作区根统一成 恰好一个结尾分隔符 的格式，防止前缀匹配陷阱。
+    # normalize the boundary: the workspace root ends with exactly one
+    # separator, preventing prefix-match traps
     safe_root = safe_root.rstrip(os.sep) + os.sep
 
-    # 路径越界检查，确保 file_path 在工作区目录下
+    # boundary check: file_path must stay inside the workspace
     if not file_path.startswith(safe_root):
         return json.dumps({
             "status": "error",
             "message": f"Access to '{file_path}' is denied."
         }, ensure_ascii=False)
 
-    # 内容大小检查，确保 content 小于 1MB
+    # size check: the content must be under 1MB
     try:
         content_size = len(content.encode(encoding))
     except UnicodeEncodeError:
@@ -569,17 +625,20 @@ async def write_file(
             "message": f"Content contains characters not encodable as {encoding}. Try encoding='utf-8'."
         }, ensure_ascii=False)
 
-    # 内容大小检查，确保 content 小于 1MB
+    # size check: the content must be under 1MB
     if content_size > MAX_WRITE_SIZE:
         return json.dumps({
             "status": "error",
             "message": f"Content size exceeds {MAX_WRITE_SIZE // 1024 // 1024}MB limit."
         }, ensure_ascii=False)
 
-    # 确保父目录存在，不存在则创建（安全链之后：realpath 已解析符号链接，不会借道越界）
-    # makedirs 可能抛 OSError（中间路径是文件、权限拒绝），必须兜底；
-    # file_path 是否为目录由锁内检查（existed 分支）承担，此处无需重复；
-    # 目录创建属磁盘 I/O，丢线程池执行，事件循环不被阻塞
+    # ensure the parent directory exists, create it on demand (after the
+    # safety chain: realpath already resolved symlinks, no detour escape)
+    # makedirs may raise OSError (a middle path is a file, permission
+    # denied), must be covered; whether file_path is a directory is left to
+    # the in-lock check (existed branch), no need to repeat here; directory
+    # creation is disk IO and runs in a thread pool, keeping the event loop
+    # unblocked
     parent = os.path.dirname(file_path)
     if parent:
         try:
@@ -590,8 +649,9 @@ async def write_file(
                 "message": f"Cannot create directory {parent}: {exc}"
             }, ensure_ascii=False)
 
-    # 文件锁，确保文件操作的原子性（与 str_replace 共享同一路径锁）；
-    # 锁内临界区（存在性检查/读取旧内容/UNCHANGED 判断/原子写）整体丢入线程池执行
+    # the file lock ensures atomicity (shared with str_replace on the same
+    # path); the whole critical section (existence check, read old content,
+    # UNCHANGED decision, atomic write) runs in a thread pool
     async with _get_file_lock(file_path):
         return await asyncio.to_thread(_write_file_io, file_path, content, encoding)
 
@@ -600,34 +660,37 @@ def _collect_delete_targets(
     target: str,
     patterns: list[str] | None,
 ) -> list[str]:
-    """扫描收集待删除路径（同步段）。
+    """Scan and collect the paths to delete (sync segment).
 
-    文件或空模式直接返回目标本身；否则 os.walk 按 basename glob 匹配
-    （fnmatch 语义）收集文件与目录，匹配的目录整目录收录。
+    A file target or empty patterns returns the target itself; otherwise
+    os.walk collects files and directories matching the basename glob
+    (fnmatch semantics), matched directories are taken as a whole.
 
     Args:
-        target:   已通过安全链校验的目标路径（工作区内绝对路径）。
-        patterns: basename 匹配模式列表；None/[] 表示删除目标本身。
+        target:   target path validated by the safety chain (workspace-internal absolute path).
+        patterns: basename match patterns; None/[] means delete the target itself.
 
     Returns:
-        待删除路径列表（绝对路径，未排序；由调用方排序后执行删除）。
+        list of absolute paths to delete, unsorted; the caller sorts
+        before deleting.
     """
     to_delete: list[str] = []
-    # 如果目标是文件或没有模式，则只删除目标本身
+    # a file target or no patterns deletes only the target itself
     if os.path.isfile(target) or not patterns:
         to_delete.append(target)
     else:
-        # os.walk onerror 显式转 error：子目录不可读时静默跳过
-        # 会导致“以为删了实际没删”，必须显式失败
+        # os.walk onerror must raise explicitly: silently skipping an
+        # unreadable subdirectory would leave the LLM believing the delete
+        # happened, fail explicitly instead
         def _on_error(exc: OSError) -> None:
             raise exc
 
-        # 遍历目录，收集匹配的文件和目录
+        # walk the tree, collecting matched files and directories
         for dirpath, dirnames, filenames in os.walk(target, onerror=_on_error):
             for d in [d for d in dirnames if any(fnmatch.fnmatch(d, p) for p in patterns)]:
                 to_delete.append(os.path.join(dirpath, d))
                 dirnames.remove(d)
-            # 收集匹配的文件
+            # collect matched files
             for f in filenames:
                 if any(fnmatch.fnmatch(f, p) for p in patterns):
                     to_delete.append(os.path.join(dirpath, f))
@@ -635,20 +698,24 @@ def _collect_delete_targets(
 
 
 def _delete_one(path: str) -> None:
-    """单路径删除（同步段）。
+    """Delete a single path (sync segment).
 
-    目录先原子改名隔离再递归删除（防删除期间新写入文件被 rmtree 误删的
-    TOCTOU），失败时清理残留；文件或符号链接直接 unlink（删除链接本身）。
+    Directories are first atomically renamed away, then recursively
+    deleted (TOCTOU guard against rmtree removing files written during
+    the deletion), with leftovers cleaned up on failure; files and
+    symlinks are unlinked directly (the link itself).
 
     Args:
-        path: 待删除的绝对路径。
+        path: absolute path to delete.
 
     Returns:
-        无返回值；删除失败时抛 OSError，由调用方兜底返回 error 响应。
+        None; raises OSError on failure, the caller converts it into an
+        error response.
     """
     if os.path.isdir(path) and not os.path.islink(path):
-        # 目录删除：先原子改名隔离再递归删除，消除“收集后新写入
-        # 文件被 rmtree 误删”的 TOCTOU；失败时 finally 兜底清理残留
+        # directory delete: atomically rename it away first, then rmtree,
+        # closing the TOCTOU where files written after collection get
+        # removed by rmtree; finally cleans up leftovers on failure
         tmp_dir = path + ".clean_tmp_" + uuid.uuid4().hex[:8]
         os.rename(path, tmp_dir)
         try:
@@ -664,34 +731,42 @@ async def clean_dir(
     dir_path: str,
     patterns: list[str] | None = None,
 ) -> str:
-    """安全地删除工作区内的文件或目录（仅限工作区）。
+    """Safely delete files or directories inside the workspace (workspace only).
 
-    patterns 为 None 或空列表时递归删除 dir_path 整体；否则按 basename
-    glob 匹配（fnmatch 语义）收集文件与目录，匹配的目录整目录删除。
+    None or an empty patterns list deletes dir_path recursively as a
+    whole; otherwise files and directories are collected by basename
+    glob matching (fnmatch semantics), and matched directories are
+    deleted as a whole.
 
-    执行模型：参数校验、路径安全检查与待删列表收集（os.walk）经 asyncio.to_thread
-    在线程池执行，事件循环不被阻塞；_clean_lock 与逐项路径锁（asyncio.Lock）的
-    获取/释放在事件循环内完成，单路径删除动作（rename/rmtree/unlink）亦经 to_thread。
+    Execution model: argument validation, path safety checks and target
+    collection (os.walk) run in a thread pool via asyncio.to_thread; the
+    _clean_lock and per-item path locks (asyncio.Lock) are acquired and
+    released on the event loop; each single-path delete action
+    (rename/rmtree/unlink) also runs via to_thread.
 
     Args:
-        dir_path:  目标路径（工作区相对路径或绝对路径），可为文件或目录。
-        patterns:  可选 basename 匹配模式列表；None/[] 表示删除 dir_path 整体。
+        dir_path: target path (workspace-relative or absolute), file or directory.
+        patterns: optional basename match patterns; None/[] deletes dir_path as a whole.
 
     Returns:
-        JSON 字符串，包含 status、message、deleted（相对工作区根的路径列表）
-        与 count（删除数量）。部分失败时 error 响应同样携带 deleted/count
-        报告已删进度——删除不可回滚，半删状态由调用方按需处理。
+        JSON string with status, message, deleted (paths relative to the
+        workspace root) and count. On partial failure the error response
+        also carries deleted/count reporting progress, deletion is not
+        rollback-able and the caller handles the half-deleted state as
+        needed.
     """
-    # 参数检查：dir_path 必须是非空字符串
-    # 非 str（如数字）会在 strip() 处 AttributeError 裸炸，LLM 传参不可信必须拦截
+    # validate dir_path: non-empty string
+    # a non-str value (e.g. a number) would blow up with AttributeError at
+    # strip(), LLM arguments are untrusted and must be intercepted
     if not isinstance(dir_path, str) or not dir_path.strip():
         return json.dumps({
             "status": "error",
             "message": "dir_path must be a non-empty string."
         }, ensure_ascii=False)
 
-    # 参数检查：patterns 必须是字符串列表或 None
-    # 字符串会被按字符迭代而静默不匹配（LLM 以为删了），数字会裸炸，必须拦截
+    # validate patterns: list of strings or None; a plain string would be
+    # iterated per character and silently match nothing (the LLM believes
+    # deletion happened), numbers would blow up, intercept both
     if patterns is not None and (
         not isinstance(patterns, list) or any(not isinstance(p, str) for p in patterns)
     ):
@@ -700,13 +775,13 @@ async def clean_dir(
             "message": "patterns must be a list of strings or None."
         }, ensure_ascii=False)
 
-    # 获取工作区目录，确保其存在并为绝对路径，注意！这是个极其严重的问题，工作区必须设置，如果未设置则必须立即报错！
+    # get the workspace directory; this is a hard requirement, fail fast when missing
     workspace = settings.workspace_dir
     if not workspace:
         raise RuntimeError("WORKSPACE_DIR is not configured, please set it up.")
     workspace = os.path.abspath(workspace)
 
-    # 在 abspath 基础上，递归解析所有符号链接，返回磁盘上的真实路径
+    # resolve all symlinks on top of abspath, returning the real path on disk
     try:
         safe_root = os.path.realpath(workspace)
     except Exception as exc:
@@ -715,18 +790,22 @@ async def clean_dir(
             "message": f"Cannot resolve workspace: {exc}"
         }, ensure_ascii=False)
 
-    # 展开用户主目录，并保存词法归一化路径（不解析符号链接，供 symlink 特判）
+    # expand the home directory and keep a lexically normalized path
+    # (symlinks unresolved, for the symlink special case)
     dir_path = os.path.expanduser(dir_path)
     raw_path = os.path.normpath(
         os.path.join(safe_root, dir_path) if not os.path.isabs(dir_path) else dir_path
     )
 
-    # 符号链接特判：必须先于 realpath——链接指向工作区外时 realpath 会越界被拦，
-    # 而链接本身在工作区内应当可删（删链接本身而非解析后的目标）
+    # symlink special case: must run before realpath, a link pointing
+    # outside the workspace would be blocked as an escape after realpath,
+    # yet the link itself inside the workspace should be deletable (the
+    # link is deleted, never the resolved target)
     if os.path.islink(raw_path):
-        # 链接本身的词法边界检查（normpath 已折叠 ..，前缀检查即安全）
+        # lexical boundary check of the link itself (normpath already
+        # folded .., prefix check is safe)
         safe_root_norm = safe_root.rstrip(os.sep)
-        
+
         if raw_path == safe_root_norm:
             return json.dumps({
                 "status": "error",
@@ -741,7 +820,8 @@ async def clean_dir(
 
         to_delete = [raw_path]
     else:
-        # 确保 dir_path 是绝对路径，如果相对路径则解析为绝对路径（递归解析符号链接）
+        # ensure an absolute path, resolve relative ones (recursively
+        # resolving symlinks)
         try:
             target = os.path.realpath(raw_path)
         except OSError as exc:
@@ -750,30 +830,32 @@ async def clean_dir(
                 "message": f"Invalid path: {exc}"
             }, ensure_ascii=False)
 
-        # 路径边界归一化，把工作区根统一成 恰好一个结尾分隔符 的格式，防止前缀匹配陷阱。
+        # normalize the boundary: the workspace root ends with exactly one
+    # separator, preventing prefix-match traps
         safe_root = safe_root.rstrip(os.sep) + os.sep
 
-        # 确保 dir_path 不是工作区根
+        # refuse to delete the workspace root
         if target == safe_root.rstrip(os.sep):
             return json.dumps({
                 "status": "error",
                 "message": "Refusing to delete the workspace root."
             }, ensure_ascii=False)
 
-        # 路径越界检查，确保 dir_path 在工作区目录下
+        # boundary check: dir_path must stay inside the workspace
         if not target.startswith(safe_root):
             return json.dumps({
                 "status": "error",
                 "message": f"Access to '{dir_path}' is denied."
             }, ensure_ascii=False)
-        # 确保 dir_path 存在
+        # the target must exist
         if not os.path.exists(target):
             return json.dumps({
                 "status": "error",
                 "message": f"'{target}' does not exist."
             }, ensure_ascii=False)
 
-        # 收集待删除的文件列表（目录扫描属磁盘 I/O，丢线程池执行）
+        # collect the delete list (directory scanning is disk IO, runs in
+        # a thread pool)
         try:
             to_delete: list[str] = await asyncio.to_thread(
                 _collect_delete_targets, target, patterns
@@ -784,7 +866,7 @@ async def clean_dir(
                 "message": f"Cannot scan '{target}': {exc}"
             }, ensure_ascii=False)
 
-    # 如果没有匹配的文件，则返回
+    # nothing matched, return early
     if not to_delete:
         return json.dumps({
             "status": "ok",
@@ -793,7 +875,7 @@ async def clean_dir(
             "count": 0,
         }, ensure_ascii=False)
 
-    # 检查删除数量是否超过限制（收集后、动手前检查，符合安全原则）
+    # cap check after collection, before any deletion (safety-first order)
     if len(to_delete) > CLEAN_MAX_ITEMS:
         return json.dumps({
             "status": "error",
@@ -807,9 +889,12 @@ async def clean_dir(
     to_delete.sort()
     deleted: list[str] = []
 
-    # 删除阶段：_clean_lock 防多个 clean_dir 并发互踩；逐项 _get_file_lock
-    # 与 str_replace / write_file 互斥，防“删除正在被写/替换的文件”导致删了又复活；
-    # 锁的获取/释放在事件循环内完成，单路径删除动作（rename/rmtree/unlink）丢线程池
+    # deletion phase: _clean_lock keeps concurrent clean_dir calls from
+    # stepping on each other; the per-item _get_file_lock excludes
+    # str_replace / write_file, so a file being written or replaced is
+    # never deleted and then resurrected; locks are acquired/released on
+    # the event loop, each single-path delete (rename/rmtree/unlink) runs
+    # in a thread pool
     async with _clean_lock:
         for path in to_delete:
             async with _get_file_lock(path):
@@ -824,7 +909,7 @@ async def clean_dir(
                     }, ensure_ascii=False)
                 deleted.append(path)
 
-    # 删除完成，返回结果
+    # deletion done, return the result
     return json.dumps({
         "status": "ok",
         "message": f"[DELETED] {len(deleted)} item(s)",

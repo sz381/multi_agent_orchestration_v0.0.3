@@ -1,32 +1,42 @@
-"""工作区只读文件系统工具实现
+"""Workspace read-only filesystem tools implementation.
 
-提供函数：
-- view_file:        按行号读取文件内容，支持分段续读（单次最多 1MB）
-- glob_tool:        按 glob 模式匹配查找文件，支持 ** 递归与 fnmatch 通配
-- grep_tool:        正则搜索文件内容，支持三种输出模式与分页
+Provides:
+- view_file:  read file content by line numbers, chunked continuation, max 1MB per call
+- glob_tool:  find files by glob pattern matching, recursive ** and fnmatch wildcards
+- grep_tool:  regex search over file content, three output modes with paging
 
-关键约束：
-- 所有工具统一返回 JSON 字符串（status: ok/error），不抛异常
-  （唯一例外：workspace 未配置时抛 RuntimeError，属配置错误而非业务错误）
-- 路径默认限制在工作区内：realpath 归一化 + 边界前缀检查，
-  allow_external_reads=True 时方可越界访问；目录符号链接不跟随（防逃逸）
-- 返回路径均为工作区内绝对路径（realpath 归一化），三工具契约一致
-- EXCLUDE_DIRS / EXCLUDE_FILES 由 glob 与 grep 共享剪枝，既不返回也不进入
-- 资源硬上限：MAX_READ_SIZE（单次读 1MB）、GLOB_MAX_RESULTS（200 结果）、
-  GLOB_MAX_SCAN / GREP_MAX_FILES（5000 扫描上限）、GREP_MAX_FILE_SIZE（10MB 单文件）
-- 二进制防护：读取前 NUL 字节嗅探（BINARY_SNIFF_BYTES），UTF-16/32 白名单放行；
-  命中判定后 view_file 返回 error，grep 静默跳过（批量扫描语义）
-- 超时熔断：正则单次匹配 REGEX_MATCH_TIMEOUT_SECONDS（防灾难性回溯），
-  grep 整次搜索另有 GREP_TOTAL_TIMEOUT_SECONDS wall-clock 总预算
+Key constraints:
+- all tools return JSON strings with status ok or error and never raise,
+  except one case: a missing workspace raises RuntimeError, a config
+  error rather than a business error
+- paths are confined to the workspace by default: realpath normalization
+  plus a boundary prefix check, allow_external_reads=True lifts the
+  limit; directory symlinks are not followed, preventing escapes
+- returned paths are absolute paths inside the workspace after realpath
+  normalization, consistent across all three tools
+- EXCLUDE_DIRS and EXCLUDE_FILES are shared by glob and grep pruning,
+  excluded entries are neither returned nor entered
+- hard resource limits: MAX_READ_SIZE (1MB per read), GLOB_MAX_RESULTS
+  (200 results), GLOB_MAX_SCAN / GREP_MAX_FILES (5000 scan cap),
+  GREP_MAX_FILE_SIZE (10MB per file)
+- binary guard: NUL byte sniffing before reads (BINARY_SNIFF_BYTES),
+  UTF-16/32 whitelisted; on a hit view_file returns an error, grep
+  skips silently (batch scan semantics)
+- timeout fuses: REGEX_MATCH_TIMEOUT_SECONDS per regex match (guards
+  against catastrophic backtracking), plus GREP_TOTAL_TIMEOUT_SECONDS
+  as an overall wall-clock budget for the whole grep call
 
-使用注意：
-- view_file 大文件分段读取：用 offset=end_line+1 续读，直至 has_more=False
-- glob_tool 需搜索排除目录内部时，将 dir_path 直接指向该目录即可
-- grep_tool 的 glob_pattern 只匹配文件名（basename），不支持 ** 与路径分隔符，
-  限定子目录请用 path 参数
-- grep_tool 超时返回已收集的部分结果：timed_out_files 为单行超时熔断计数，
-  search_timed_out=True 表示结果不完整（不是错误）
-- 本模块只读；写操作请使用 _fs_mutate
+Usage notes:
+- view_file reads large files in chunks: continue with offset=end_line+1
+  until has_more=False
+- glob_tool can search inside excluded directories by pointing dir_path
+  directly at that directory
+- grep_tool glob_pattern matches file names (basename) only, no ** and
+  no path separators; scope a subdirectory with the path parameter
+- grep_tool timeouts return the partial results already collected:
+  timed_out_files counts per-line fuses, search_timed_out=True means
+  the results are incomplete, not an error
+- this module is read-only; use _fs_mutate for write operations
 """
 
 import os
@@ -58,24 +68,28 @@ def _view_file_io(
     limit: int,
     encoding: str,
 ) -> str:
-    """核心读取同步段：二进制嗅探 → 跳过 offset-1 行 → 按 limit/1MB 截断读取，返回 JSON。
+    """Core read sync segment: binary sniff, skip offset-1 lines, then read
+    truncated by limit and the 1MB cap, return JSON.
 
-    由 view_file 经 asyncio.to_thread 调用，磁盘 I/O 与行处理在线程池执行，
-    事件循环不被阻塞；二进制嗅探命中、EOF/截断判定等语义与原实现完全一致。
+    Called by view_file via asyncio.to_thread, so disk IO and line
+    processing run in a thread pool and never block the event loop;
+    binary sniff hits, EOF and truncation semantics match the main
+    function exactly.
 
     Args:
-        file_path: 文件绝对路径（已通过安全链校验）。
-        offset:    起始显示行（从 1 开始）。
-        limit:     最大返回行数（1-1000）。
-        encoding:  文件编码。
+        file_path: absolute file path, already validated by the safety chain.
+        offset:    first line to display, starting from 1.
+        limit:     maximum lines to return (1-1000).
+        encoding:  file encoding.
 
     Returns:
-        JSON 字符串，契约与 view_file 主函数一致：ok 时含 path/read_lines/
-        start_line/end_line/has_more/truncated/lines；error 时仅 message。
+        JSON string with the same contract as view_file: on ok it carries
+        path/read_lines/start_line/end_line/has_more/truncated/lines;
+        on error only message.
     """
     try:
-        # 二进制嗅探：以二进制模式读取文件头部，检测 NUL 字节；
-        # UTF-16/UTF-32 文本编码天然含 NUL，白名单放行
+        # binary sniff: read the file head in binary mode and look for NUL bytes;
+        # UTF-16/UTF-32 encodings naturally contain NUL, so they are whitelisted
         with open(file_path, "rb") as f:
             head = f.read(BINARY_SNIFF_BYTES)
         if b"\x00" in head and not encoding.lower().startswith(("utf-16", "utf-32")):
@@ -89,17 +103,17 @@ def _view_file_io(
             }, ensure_ascii=False)
 
         with open(file_path, "r", encoding=encoding) as f:
-            messages: list[str] = []            # 用于存储提示信息，非致命错误会追加到此列表中
-            skipped_lines = 0                   # 用于记录已跳过行数
-            skipped_bytes = 0                   # 用于记录已跳过字节总量
-            skip_warned = False                 # 用于记录是否已提示跳过开销过大
+            messages: list[str] = []            # holds advisory messages, non-fatal issues append here
+            skipped_lines = 0                   # lines skipped so far
+            skipped_bytes = 0                   # total bytes skipped so far
+            skip_warned = False                 # whether the expensive-skip warning was already emitted
 
-            # 先跳过 offset-1 行，确保从 offset 行开始读取
+            # skip offset-1 lines first, so reading starts at line offset
             while skipped_lines < offset - 1:
-                # 读取一行
+                # read one line
                 line = f.readline()
 
-                # EOF, 如果读取为空，表示文件提前结束
+                # EOF: an empty read means the file ended early
                 if not line:
                     return json.dumps({
                         "status": "error",
@@ -109,11 +123,11 @@ def _view_file_io(
                         )
                     }, ensure_ascii=False)
 
-                # 跳过当前行，增加已跳过行数和字节数
+                # skip the current line, bump the skipped line and byte counts
                 skipped_lines += 1
                 skipped_bytes += len(line.encode(encoding))
 
-                # 如果跳过字节数超过阈值且未提示，则提示跳过开销过大
+                # warn once when skipped bytes pass the threshold, the skip is expensive
                 if not skip_warned and skipped_bytes > VIEW_FILE_MAX_SKIP_BYTES:
                     skip_warned = True
                     messages.append(
@@ -121,29 +135,29 @@ def _view_file_io(
                         f"offset {offset}; reading remains available but expensive."
                     )
 
-            # 从 offset 行开始读取，直到达到 limit、EOF 或累计超过 MAX_READ_SIZE
-            lines: list[str] = []                # 用于存储读取的行
-            bytes_read = 0                       # 用于记录已读字节数
-            truncated = False                    # 用于记录是否截断
+            # read from line offset until limit lines, EOF, or MAX_READ_SIZE is exceeded
+            lines: list[str] = []                # holds the read lines
+            bytes_read = 0                       # bytes read so far
+            truncated = False                    # whether the read was truncated
 
-            # 循环读取，直到达到 limit 行数限制或文件结束
+            # keep reading until the limit line count or EOF
             while len(lines) < limit:
-                # 读取一行，如果文件结束则跳出循环（EOF），表示文件内容提前结束
+                # read one line; an empty read means EOF, so stop
                 line = f.readline()
                 if not line:
                     break
 
-                # 计算当前行的字节数，如果加上当前行的字节数超过 MAX_READ_SIZE，则截断并跳出循环
+                # line bytes; truncate and stop when the running total would pass MAX_READ_SIZE
                 line_bytes = len(line.encode(encoding))
                 if bytes_read + line_bytes > MAX_READ_SIZE:
                     truncated = True
                     break
 
-                # 将当前行添加到结果列表中，并增加已读字节数
+                # append the line and bump the bytes read
                 lines.append(line)
                 bytes_read += line_bytes
 
-            # 判定 has_more：截断时恒为 True；未截断且读满 limit 行时探测 EOF
+            # has_more: always True when truncated; otherwise probe EOF when the full limit was read
             has_more = truncated
             if not truncated and len(lines) == limit:
                 pos = f.tell()
@@ -151,7 +165,7 @@ def _view_file_io(
                     has_more = True
                 f.seek(pos)
 
-            # 如果没有读取到任何行：
+            # no lines were read at all:
             if not lines:
                 if truncated:
                     messages.append(
@@ -172,7 +186,7 @@ def _view_file_io(
                     result["message"] = " ".join(messages)
                 return json.dumps(result, ensure_ascii=False)
 
-            # 构建返回数据，包含文件路径、读取行数、起始行、结束行、是否截断、行内容列表
+            # assemble the response with path, line counts, range, truncation flag and line contents
             start_line = offset
             end_line = offset + len(lines) - 1
             numbered_lines = [
@@ -198,7 +212,7 @@ def _view_file_io(
                 result["message"] = " ".join(messages)
             return json.dumps(result, ensure_ascii=False)
 
-    # 二次兜底检测，防止潜在发生的 race conditions 绕过之前的检测
+    # second defense: catch races that slipped past the earlier checks
     except FileNotFoundError:
         return json.dumps({
             "status": "error",
@@ -236,62 +250,66 @@ async def view_file(
     encoding: str = "utf-8",
     allow_external_reads: bool = False,
 ) -> str:
-    """按行号读取文件内容，从指定行开始读取指定行数。
+    """Read file content by line numbers, from a start line for a given count.
 
-    支持大文件：每次读取最多 1MB 数据（按行截断），offset 可指向任意行，
-    目标行之前的行会被跳过（跳过超过 VIEW_FILE_MAX_SKIP_BYTES 时仅提示、不中断），
-    调用方可使用 offset=end_line+1 分段续读，直至 has_more=False。
+    Supports large files: each call reads at most 1MB of data, truncated
+    at line boundaries; offset may point at any line and preceding lines
+    are skipped (a skip beyond VIEW_FILE_MAX_SKIP_BYTES only warns and
+    never aborts); callers continue with offset=end_line+1 until
+    has_more=False.
 
-    执行模型：参数校验与路径安全检查在事件循环内完成（纯 CPU）；核心读取逻辑
-    （二进制嗅探/行跳过/截断判定）经 asyncio.to_thread 在线程池执行，
-    事件循环不被磁盘 I/O 阻塞。
+    Execution model: argument validation and path safety checks run on
+    the event loop (pure CPU); the core reading logic (binary sniff,
+    line skipping, truncation) runs in a thread pool via
+    asyncio.to_thread, keeping disk IO off the event loop.
 
     Args:
-        file_path:              文件路径（工作区相对路径或绝对路径）。
-        offset:                 起始显示行（从 1 开始，默认 1）。
-        limit:                  最大返回行数（1-1000，默认 100）。
-        encoding:               文件编码（默认 utf-8）。
-        allow_external_reads:   是否允许读取工作区以外的文件。
+        file_path:             file path, workspace-relative or absolute.
+        offset:                first line to display, starting from 1 (default 1).
+        limit:                 maximum lines to return, 1-1000 (default 100).
+        encoding:              file encoding (default utf-8).
+        allow_external_reads:  whether to allow reading files outside the workspace.
 
     Returns:
-        JSON 字符串。
-        status 为 "ok" 时：path、read_lines、start_line、end_line、has_more、truncated、
-                          lines（[{line_no, content}]），截断或跳过开销过大时附加 message 提示；
-        status 为 "error" 时：仅 message。
+        JSON string. On ok: path, read_lines, start_line, end_line,
+        has_more, truncated, lines (a list of {line_no, content}); a
+        message is added on truncation or an expensive skip. On error:
+        only message.
 
     Notes:
-        - has_more 为 True 表示文件仍有未返回的行（truncated 时恒为 True）
-        - 分段续读：下次调用使用 offset=end_line+1
-        - offset 超过文件总行数时返回 error；恰好指向末尾下一行时返回空结果
+        - has_more True means unreturned lines remain, always True when truncated
+        - chunked continuation: the next call uses offset=end_line+1
+        - offset beyond the total line count returns an error; pointing
+          exactly at the line after the last one returns an empty result
     """
-    # 参数校验：file_path 参数不能为空
+    # validate file_path: must not be empty
     if not file_path or not file_path.strip():
         return json.dumps({
             "status": "error",
             "message": "file_path must not be empty."
         }, ensure_ascii=False)
 
-    # 参数校验：limit 参数必须是 1-1000 的整数（bool 是 int 子类，需排除）
+    # validate limit: integer in 1-1000 (bool is an int subclass, must be excluded)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 1000:
         return json.dumps({
             "status": "error",
             "message": "limit must be an integer between 1 and 1000."
         }, ensure_ascii=False)
 
-    # 参数校验：offset 参数必须是正整数
+    # validate offset: positive integer
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 1:
         return json.dumps({
             "status": "error",
             "message": "offset must be a positive integer."
         }, ensure_ascii=False)
 
-    # 获取工作区目录，确保其存在并为绝对路径，注意！这是个极其严重的问题，工作区必须设置，如果未设置则必须立即报错！
+    # get the workspace directory; this is a hard requirement, fail fast when missing
     workspace = settings.workspace_dir
     if not workspace:
         raise RuntimeError("WORKSPACE_DIR is not configured, please set it up.")
     workspace = os.path.abspath(workspace)
 
-    # 在 abspath 基础上，递归解析所有符号链接，返回磁盘上的真实路径
+    # resolve all symlinks on top of abspath, returning the real path on disk
     try:
         safe_root = os.path.realpath(workspace)
     except Exception as exc:
@@ -300,10 +318,10 @@ async def view_file(
             "message": f"Cannot resolve workspace: {exc}"
         }, ensure_ascii=False)
 
-    # 家目录展开，如果 file_path 传入的是 ~ 或 ~用户名，例如：~/Desktop/foo.py --> /home/user/Desktop/foo.py
+    # expand the home directory, e.g. ~/Desktop/foo.py becomes /home/user/Desktop/foo.py
     file_path = os.path.expanduser(file_path)
 
-    # 解析 file_path 参数传入的文件路径，确保其存在并为绝对路径
+    # resolve the passed path to an absolute real path
     try:
         if not os.path.isabs(file_path):
             file_path = os.path.realpath(os.path.join(safe_root, file_path))
@@ -315,33 +333,34 @@ async def view_file(
             "message": f"Invalid path: {exc}"
         }, ensure_ascii=False)
 
-    # 路径边界归一化，把工作区根统一成 恰好一个结尾分隔符 的格式，防止前缀匹配陷阱. 
-    # 剥掉结尾所有分隔符：/Users/foo/// --> /Users/foo，再补恰好一个：--> /Users/foo/
+    # normalize the boundary: the workspace root must end with exactly one
+    # separator to prevent prefix-match traps; strip all trailing separators
+    # (/Users/foo/// becomes /Users/foo), then add exactly one
     safe_root = safe_root.rstrip(os.sep) + os.sep
 
-    # 路径越界检查，确保 file_path 在工作区目录下
+    # boundary check: file_path must stay inside the workspace
     if not allow_external_reads and not file_path.startswith(safe_root):
         return json.dumps({
             "status": "error",
             "message": f"Access to '{file_path}' is denied."
         }, ensure_ascii=False)
 
-    # 文件存在性检查，确保 file_path 指向的文件存在
+    # existence check: file_path must exist
     if not os.path.exists(file_path):
         return json.dumps({
             "status": "error",
             "message": f"File '{file_path}' does not exist."
         }, ensure_ascii=False)
 
-    # 文件类型检查，确保 file_path 指向的不是目录
+    # type check: file_path must not be a directory
     if os.path.isdir(file_path):
         return json.dumps({
             "status": "error",
             "message": f"'{file_path}' is a directory."
         }, ensure_ascii=False)
 
-    # 核心读取逻辑（二进制嗅探/行跳过/截断判定）整体丢线程池执行，
-    # 事件循环不被磁盘 I/O 阻塞
+    # the core read logic (binary sniff, line skipping, truncation) runs
+    # entirely in a thread pool, keeping disk IO off the event loop
     return await asyncio.to_thread(_view_file_io, file_path, offset, limit, encoding)
 
 
@@ -351,30 +370,36 @@ def _glob_walk(
     results: list[str],
     limits: dict[str, int | bool],
 ) -> None:
-    """glob 递归匹配引擎：按模式段逐层匹配目录条目。
+    """Recursive glob matching engine: matches directory entries segment by segment.
 
-    每层递归消费 parts 的一段：
-    - 普通段：fnmatch 匹配当前目录条目名，匹配的目录继续递归剩余段
-    - ** 段：跨任意层——先尝试零层（跳过 **），再对每个子目录继续完整模式
-    - EXCLUDE_DIRS / EXCLUDE_FILES 在递归与记录时剪枝
-    - limits 跨递归共享：total 累计匹配数，stop 熔断后所有在途调用立即返回
+    Each recursion level consumes one part of the pattern:
+    - plain segment: fnmatch against the current entry name, matched
+      directories recurse into the remaining parts
+    - ** segment: crosses any depth, first tries zero levels (skip **),
+      then recurses into every subdirectory with the full pattern
+    - EXCLUDE_DIRS / EXCLUDE_FILES prune both recursion and recording
+    - limits is shared across recursion: total accumulates matches, once
+      stop is set every in-flight call returns immediately
 
     Args:
-        root:       当前扫描目录的绝对路径。
-        parts:      剩余待匹配的模式段（如 ["**", "*.py"]）。
-        results:    共享的结果列表，匹配路径追加于此（受 GLOB_MAX_RESULTS 截断）。
-        limits:     共享的计数与熔断标志（{"total": 匹配数, "stop": 是否熔断}）。
+        root:     absolute path of the directory being scanned.
+        parts:    remaining pattern segments, e.g. ["**", "*.py"].
+        results:  shared result list, matched paths append here, capped
+                  by GLOB_MAX_RESULTS.
+        limits:   shared counters and fuse flag, {"total": matches, "stop": fuse}.
 
     Returns:
-        None，结果写入 results，熔断状态写入 limits。
+        None; results are written to results and the fuse state to limits.
     """
-    # 熔断检查：每一层递归进来先看"是否已经喊停"。
-    # limits["total"] 是共享的，某层的某个分支把计数顶到 5000 后设置 stop = True，
-    # 但递归树上还有一堆已经在半路的调用——它们进来第一件事就是看到 stop，立刻返回。
+    # fuse check: every recursion level first looks at whether the scan was stopped.
+    # limits["total"] is shared; some branch pushed the count to 5000 and set
+    # stop = True, but in-flight calls deeper in the tree are already on their
+    # way, they see stop first thing and return immediately.
     if limits["stop"]:
         return
 
-    # parts 为空：所有模式段都消费完了，当前目录路径就是完整匹配，记录后返回。
+    # parts is empty: every segment is consumed, the current directory is a
+    # full match, record it and return.
     if not parts:
         limits["total"] += 1
         if len(results) < GLOB_MAX_RESULTS:
@@ -383,36 +408,40 @@ def _glob_walk(
             limits["stop"] = True
         return
 
-    # 列出当前目录所有条目（文件+子目录）。
-    # list() 包一下是因为 scandir 返回迭代器，而 ** 分支需要多次遍历（先零层再一层），
-    # 迭代器只能走一遍，必须先固化成 list。
+    # list every entry (files and subdirectories) of the current directory.
+    # list() materializes the scandir iterator because the ** branch needs
+    # multiple passes (zero levels then one level) and an iterator can only
+    # be walked once.
     try:
         entries = list(os.scandir(root))
     except OSError:
-        # 权限不足或目录被删的目录静默跳过：搜索工具遇到不可读目录应继续搜别处，
-        # 而不是中断整个搜索。
+        # silently skip unreadable or vanished directories: a search tool
+        # should keep scanning elsewhere instead of aborting the whole search.
         return
 
-    # head 是当前 parts 第一层需要匹配的字段，tail 是剩余的 parts
-    # example: parts: ["a", "b", "c"]	  head: "a"	    tails: ["b", "c"]
+    # head is the segment the current level must match, tail is the rest
+    # example: parts: ["a", "b", "c"], head: "a", tails: ["b", "c"]
     head, *tail = parts
 
-    # ** 的语义是"跨任意层"：同时尝试匹配零层（跳过 **）和一层或多层（递归子目录）。
+    # ** means "cross any depth": try zero levels (skip **) and one or more
+    # levels (recurse into subdirectories).
     if head == "**":
-        # 匹配零层：** 视为不存在，直接用剩余模式匹配当前目录。
-        # tail 为空时此处会记录 root 自身（目录本身）；一层循环对目录只递归不记录，
-        # 因此每个目录恰好被记录一次，无重复。
+        # zero levels: treat ** as absent and match the remaining pattern
+        # against the current directory. When tail is empty, root itself is
+        # recorded here; the one-level loop only recurses into directories
+        # without recording, so each directory is recorded exactly once.
         _glob_walk(root, tail, results, limits)
         if limits["stop"]:
             return
 
-        # 匹配一层或多层：子目录继续完整模式递归；文件仅在模式到此结束时直接记录
+        # one or more levels: subdirectories recurse with the full pattern;
+        # files are recorded only when the pattern ends here
         for entry in entries:
             if entry.is_dir(follow_symlinks=False):
                 if entry.name not in EXCLUDE_DIRS:
                     _glob_walk(entry.path, parts, results, limits)
             elif not tail:
-                # ** 直接匹配到文件本身（模式到 ** 就结束了）
+                # ** matched the file itself (the pattern ends at **)
                 if entry.name in EXCLUDE_FILES:
                     continue
                 limits["total"] += 1
@@ -424,17 +453,19 @@ def _glob_walk(
             if limits["stop"]:
                 break
     else:
-        # 普通分段：fnmatch 匹配当前层条目名
+        # plain segment: fnmatch against entry names of the current level
         for entry in entries:
             if not fnmatch.fnmatch(entry.name, head):
                 continue
 
-            # 还有剩余段：匹配到的必须是目录（且不在排除列表）才能继续递归
+            # segments remain: the matched entry must be a directory not in
+            # the exclude list to recurse
             if tail:
                 if entry.is_dir(follow_symlinks=False) and entry.name not in EXCLUDE_DIRS:
                     _glob_walk(entry.path, tail, results, limits)
             else:
-                # 模式到此结束：排除文件与排除目录，其余记录为匹配结果
+                # the pattern ends here: skip excluded files and directories,
+                # record the rest as matches
                 if entry.name in EXCLUDE_FILES:
                     continue
                 if entry.is_dir(follow_symlinks=False) and entry.name in EXCLUDE_DIRS:
@@ -455,37 +486,45 @@ def _glob_scan_io(
     parts: list[str],
     pattern: str,
 ) -> str:
-    """核心扫描同步段：递归遍历目录树匹配模式，统计结果并组装响应 JSON。
+    """Core scan sync segment: recursive directory walk matching the pattern,
+    tallying results and assembling the response JSON.
 
-    由 glob_tool 经 asyncio.to_thread 调用，os.scandir 目录遍历与 fnmatch
-    匹配在线程池执行，事件循环不被阻塞；_glob_walk 为纯同步递归，全量在
-    本函数内完成（含 RecursionError/OSError 兜底与结果统计）。
+    Called by glob_tool via asyncio.to_thread; os.scandir traversal and
+    fnmatch matching run in a thread pool and never block the event
+    loop. _glob_walk is plain synchronous recursion and completes
+    entirely inside this function, including RecursionError/OSError
+    fallbacks and result tallying.
 
     Args:
-        search_dir: 已通过安全链校验的搜索目录绝对路径。
-        parts:      拆分后的模式段列表（如 ["**", "*.py"]）。
-        pattern:    原始 glob 模式（用于响应中的 pattern 字段与 message）。
+        search_dir: absolute path of the search directory, validated by the safety chain.
+        parts:      split pattern segments, e.g. ["**", "*.py"].
+        pattern:    original glob pattern, used for the pattern field and message.
 
     Returns:
-        JSON 字符串，契约与 glob_tool 主函数一致：ok 时含 pattern/count/
-        files/truncated/message；error 时仅 message。
+        JSON string with the same contract as glob_tool: on ok it carries
+        pattern/count/files/truncated/message; on error only message.
     """
-    # 这里为什么要用 list 和 Dict 呢？
-    #     因为 _glob_walk 是递归的，递归的每一层都想要修改同一个结果列表和同一个计数器。
-    #        - int、str 是不可变的——传给函数的是副本，改了自己那层，别的层看不见
-    #        - list、dict 是可变的——传的是同一个对象的引用，任何一层往里 append，所有层都能看到
-    #     所以：
-    #        - file_matches（list）：所有层往这里追加匹配结果
-    #        - limits（dict）：所有层共享扫描计数和"是否熔断"标志
-    #     这个 limits 是跨递归共享的可变状态，这就是为什么用 dict 而不是直接传两个 int——传 int 的话，
-    #     子层改了 total，父层完全不知道。
-    file_matches: list[str] = []               # 匹配的文件路径列表
-    limits = {"total": 0, "stop": False}       # 匹配结果数量限制
+    # why list and dict instead of plain values?
+    #     _glob_walk is recursive and every level wants to mutate the same
+    #     result list and the same counter.
+    #       - int and str are immutable: a copy is passed to the callee,
+    #         changes inside one level are invisible to the others
+    #       - list and dict are mutable: the same object reference is shared,
+    #         appends from any level are visible to all
+    #     so:
+    #       - file_matches (list): every level appends its matches here
+    #       - limits (dict): every level shares the scan counter and fuse flag
+    #     limits is mutable state shared across recursion, which is why a dict
+    #     is used instead of two ints, a child level mutating total would
+    #     otherwise be invisible to the parent.
+    file_matches: list[str] = []               # matched file paths
+    limits = {"total": 0, "stop": False}       # scan counter and fuse flag
 
     try:
         _glob_walk(search_dir, parts, file_matches, limits)
     except RecursionError:
-        # python 递归默认深度大约 1k 层，如果超限，返回给 LLM。应该不会有人去套 这么多文件夹吧。。。
+        # python recursion defaults to roughly 1k levels; on overflow, report
+        # back to the LLM. Nobody should nest folders that deep anyway.
         return json.dumps({
             "status": "error",
             "message": "Scan failed: directory tree is too deep."
@@ -496,7 +535,7 @@ def _glob_scan_io(
             "message": f"Scan failed: {exc}"
         }, ensure_ascii=False)
 
-    # 统计匹配结果数量，包含被截断的数量，以及是否被截断的标志，最后返回 JSON 字符串
+    # tally the match count, detect truncation, and return the JSON string
     total = min(limits["total"], GLOB_MAX_SCAN)
     file_matches.sort()
     truncated = total >= GLOB_MAX_SCAN or len(file_matches) >= GLOB_MAX_RESULTS
@@ -515,67 +554,72 @@ async def glob_tool(
     dir_path: str = ".",
     allow_external_reads: bool = False,
 ) -> str:
-    """按 glob 模式匹配查找文件，返回匹配的文件路径列表。
+    """Find files by glob pattern matching, returning matched file paths.
 
-    模式必须为相对路径，支持 fnmatch 通配（*、?、[seq]）与 ** 递归匹配子目录；
-    扫描时自动剪枝排除目录与排除文件（EXCLUDE_DIRS / EXCLUDE_FILES），
-    结果数量与扫描总量分别受 GLOB_MAX_RESULTS / GLOB_MAX_SCAN 硬上限保护。
+    The pattern must be relative; fnmatch wildcards (*, ?, [seq]) and **
+    recursive subdirectory matching are supported. Excluded directories
+    and files (EXCLUDE_DIRS / EXCLUDE_FILES) are pruned during the scan,
+    and the result count and total scan are capped by GLOB_MAX_RESULTS
+    and GLOB_MAX_SCAN.
 
-    执行模型：参数校验与路径安全检查在事件循环内完成（纯 CPU）；目录树扫描
-    （os.scandir 递归 + fnmatch 匹配）经 asyncio.to_thread 在线程池执行，
-    事件循环不被磁盘 I/O 阻塞。
+    Execution model: argument validation and path safety checks run on
+    the event loop (pure CPU); the directory scan (os.scandir recursion
+    plus fnmatch matching) runs in a thread pool via asyncio.to_thread,
+    keeping disk IO off the event loop.
 
     Args:
-        pattern:                glob 模式（如 **/*.py、src/*.py），** 表示跨任意层目录。
-        dir_path:               搜索目录（默认 '.'，即工作区根，可指定工作区内子目录）。
-        allow_external_reads:   是否允许搜索工作区以外的目录。
+        pattern:              glob pattern, e.g. **/*.py or src/*.py, ** crosses any depth.
+        dir_path:             search directory, default '.' (workspace root, or a subdirectory).
+        allow_external_reads: whether to allow searching outside the workspace.
 
     Returns:
-        JSON 字符串。status 为 "ok" 时：pattern、count（总匹配数）、
-        files（匹配的文件路径列表）、truncated（是否因达到上限被截断），
-        message 汇总匹配数量；status 为 "error" 时：仅 message。
+        JSON string. On ok: pattern, count (total matches), files (list
+        of matched paths), truncated (whether a limit was hit), and a
+        message summarizing the count. On error: only message.
 
     Notes:
-        - ** 通常与其他段配合（如 **/*.py）；裸 ** 匹配全部文件与目录
-        - 排除目录（.git、.venv、node_modules 等）既不返回也不进入，
-          若需搜索其内部，将 dir_path 直接指向该目录即可
-        - files 最多返回 GLOB_MAX_RESULTS 个，总匹配数超过时 truncated=True
+        - ** is usually combined with other segments (e.g. **/*.py);
+          a bare ** matches everything, files and directories
+        - excluded directories (.git, .venv, node_modules, etc.) are
+          neither returned nor entered; point dir_path at one to search inside it
+        - files holds at most GLOB_MAX_RESULTS entries; truncated=True
+          when the total exceeds the cap
     """
-    # 如果要匹配的模式为空，则返回错误，参数错误
+    # empty pattern: argument error
     if not pattern or not pattern.strip():
         return json.dumps({
             "status": "error",
             "message": "pattern must not be empty."
         }, ensure_ascii=False)
 
-    # 拒绝绝对路径模式
+    # reject absolute path patterns
     if os.path.isabs(pattern):
         return json.dumps({
             "status": "error",
             "message": "pattern must be relative, absolute paths are not allowed."
         }, ensure_ascii=False)
 
-    # 拒绝路径穿越组件
+    # reject path traversal components
     if ".." in pattern.split(os.sep):
         return json.dumps({
             "status": "error",
             "message": "pattern must not contain '..' components."
         }, ensure_ascii=False)
 
-    # 如果目录路径为空，则返回错误，参数错误
+    # empty dir_path: argument error
     if not dir_path or not dir_path.strip():
         return json.dumps({
             "status": "error",
             "message": "dir_path must not be empty."
         }, ensure_ascii=False)
 
-    # 获取工作区目录，确保其存在并为绝对路径，注意！这是个极其严重的问题，工作区必须设置，如果未设置则必须立即报错！
+    # get the workspace directory; this is a hard requirement, fail fast when missing
     workspace = settings.workspace_dir
     if not workspace:
         raise RuntimeError("WORKSPACE_DIR is not configured, please set it up.")
     workspace = os.path.abspath(workspace)
 
-    # 在 abspath 基础上，递归解析所有符号链接，返回磁盘上的真实路径
+    # resolve all symlinks on top of abspath, returning the real path on disk
     try:
         safe_root = os.path.realpath(workspace)
     except Exception as exc:
@@ -584,10 +628,10 @@ async def glob_tool(
             "message": f"Cannot resolve workspace: {exc}"
         }, ensure_ascii=False)
 
-    # 展开用户主目录
+    # expand the user home directory
     dir_path = os.path.expanduser(dir_path)
 
-    # 拼接 workspace + dir_path 找到搜索目录 `search_dir`
+    # join workspace + dir_path to locate the search directory `search_dir`
     try:
         if not os.path.isabs(dir_path):
             search_dir = os.path.realpath(os.path.join(safe_root, dir_path))
@@ -599,36 +643,38 @@ async def glob_tool(
             "message": f"Invalid path: {exc}"
         }, ensure_ascii=False)
 
-    # 路径边界归一化：工作区根统一为恰好一个结尾分隔符，防止前缀匹配陷阱
+    # normalize the boundary: the workspace root ends with exactly one
+    # separator, preventing prefix-match traps
     safe_root = safe_root.rstrip(os.sep) + os.sep
 
-    # 如果在没有 allow_external_reads 的时候，搜索目录不在工作区范围内，则返回错误，访问被拒绝
+    # boundary check: without allow_external_reads, a search directory
+    # outside the workspace is rejected
     if not allow_external_reads and not (search_dir + os.sep).startswith(safe_root):
         return json.dumps({
             "status": "error",
             "message": f"Access to '{dir_path}' is denied."
         }, ensure_ascii=False)
 
-    # 如果搜索目录不存在，则返回错误，目录不存在
+    # the search directory must exist
     if not os.path.isdir(search_dir):
         return json.dumps({
             "status": "error",
             "message": f"'{search_dir}' is not a directory."
         }, ensure_ascii=False)
 
-    # 为 glob 递归匹配引擎 准备 匹配模式段
+    # prepare pattern segments for the recursive glob engine
     # example: **/*.py -> ['**', '*.py'], orchestration/tools/*.py -> ["orchestration", "tools", "*.py"]
     parts = [p for p in pattern.split("/") if p]
 
-    # 匹配模式段 空检测
+    # empty segment check
     if not parts:
         return json.dumps({
             "status": "error",
             "message": "pattern must not be empty."
         }, ensure_ascii=False)
 
-    # 核心扫描（递归遍历目录树 + 结果统计）整体丢线程池执行，
-    # 事件循环不被磁盘 I/O 阻塞
+    # the core scan (recursive tree walk plus result tallying) runs entirely
+    # in a thread pool, keeping disk IO off the event loop
     return await asyncio.to_thread(_glob_scan_io, search_dir, parts, pattern)
 
 
@@ -646,45 +692,52 @@ def _grep_io(
     allow_external_reads: bool,
     safe_root: str,
 ) -> str:
-    """核心搜索同步段：文件收集（os.walk）→ 逐文件读盘匹配 → 结果渲染，返回 JSON。
+    """Core search sync segment: file collection (os.walk), per-file read
+    and match, result rendering, return JSON.
 
-    由 grep_tool 经 asyncio.to_thread 调用，目录遍历、文件读取与正则匹配
-    在线程池执行，事件循环不被阻塞。GREP_TOTAL_TIMEOUT_SECONDS 总时长预算
-    （收集 + 搜索共享）与 REGEX_MATCH_TIMEOUT_SECONDS 单行超时熔断均在
-    本函数内生效，语义与原实现完全一致。
+    Called by grep_tool via asyncio.to_thread; directory traversal, file
+    reads and regex matching run in a thread pool and never block the
+    event loop. The GREP_TOTAL_TIMEOUT_SECONDS overall budget (shared by
+    collection and search) and the REGEX_MATCH_TIMEOUT_SECONDS per-line
+    fuse both take effect inside this function, matching the original
+    semantics exactly.
 
     Args:
-        real_path:              已通过安全链校验的搜索路径（文件或目录）绝对路径。
-        re_compiled:            预编译正则（含 IGNORECASE/DOTALL 标志）。
-        pattern:                原始正则表达式（用于响应 message）。
-        glob_pattern:           basename 过滤模式（None 表示不过滤）。
-        output_mode:            files_with_matches / content / count 之一。
-        context_lines:          上下文行数（0-10）。
-        head_limit:             最大结果数（0-1000，0 表示不限）。
-        offset:                 跳过前 N 个结果。
-        multiline:              是否启用多行匹配（DOTALL）。
-        encoding:               文件编码。
-        allow_external_reads:   是否允许搜索工作区以外的文件（读取前复查）。
-        safe_root:              归一化后的工作区根（结尾带分隔符）。
+        real_path:            absolute search path (file or directory), validated by the safety chain.
+        re_compiled:          precompiled regex with IGNORECASE/DOTALL flags.
+        pattern:              original regex, used for the response message.
+        glob_pattern:         basename filter pattern, None means no filtering.
+        output_mode:          one of files_with_matches, content, count.
+        context_lines:        context lines around each match (0-10).
+        head_limit:           maximum result count (0-1000, 0 means unlimited).
+        offset:               skip the first N results.
+        multiline:            whether multiline matching is enabled (DOTALL).
+        encoding:             file encoding.
+        allow_external_reads: whether to allow searching outside the workspace, rechecked before reads.
+        safe_root:            normalized workspace root, ending with a separator.
 
     Returns:
-        JSON 字符串，契约与 grep_tool 主函数一致：ok 时含 output_mode 相关
-        字段（files/results/total_matches/truncated 等）；error 时仅 message。
+        JSON string with the same contract as grep_tool: on ok it carries
+        output_mode-specific fields (files/results/total_matches/truncated,
+        etc.); on error only message.
     """
-    # 文件收集阶段
-    # 在做真正的 正则匹配 之前，先把 “要收集哪些文件” 的清单列出来
-    # 用户传 path
-    # ├─ path 是单个文件 ──→ files = [该文件]（跳过遍历）
-    # └─ path 是目录 ──────→ os.walk 全树遍历 + 多层过滤 → files 列表
-    #                             ↓
-    #                     然后逐个文件读内容、跑正则（本段之后的代码）
-    # 为什么要分两个阶段？
-    #    - 因为过滤（排除目录、文件名、上限）必须在"读文件内容"之前完成——否则会读一堆根本不搜的文件，浪费大量 IO。
-    files = []                              # 用于收集文件
-    files_truncated = False                 # 用于判断是否文件收集的数量超过 GREP_MAX_FILES 最大结果数
+    # file collection phase
+    # before any regex matching, build the list of files to read
+    # the user passes a path
+    #   path is a single file: files = [that file], traversal skipped
+    #   path is a directory: full os.walk traversal plus layered filters
+    # then each file is read and matched (code after this section)
+    # why two phases?
+    #   filtering (excluded dirs, names, caps) must happen before file
+    #   contents are read, otherwise a pile of never-searched files would
+    #   be read, wasting a lot of IO
+    files = []                              # collected files
+    files_truncated = False                 # whether collection hit the GREP_MAX_FILES cap
 
-    # 总时长预算：整次调用（收集 + 搜索）的 wall-clock 硬上限，用单调时钟（不受系统时间调整影响）；
-    # 超时后返回已收集的部分结果并标记 search_timed_out，而不是报错
+    # total time budget: hard wall-clock cap for the whole call (collection
+    # plus search), using a monotonic clock immune to system time changes;
+    # on timeout the partial results are returned with search_timed_out set,
+    # not an error
     _deadline = time.monotonic() + GREP_TOTAL_TIMEOUT_SECONDS
     search_timed_out = False
 
@@ -692,39 +745,41 @@ def _grep_io(
         files.append(real_path)
     else:
         try:
-            # 遍历 real_path 目录，获取所有文件和子目录
+            # walk the real_path directory, collecting all files and subdirectories
             for dirpath, dirnames, filenames in os.walk(real_path):
-                # 总时长预算检查：大目录树遍历也会吃预算，超时立即停止收集
+                # budget check: walking a huge tree also consumes the budget, stop collecting on timeout
                 if time.monotonic() > _deadline:
                     search_timed_out = True
                     break
-                # 过滤掉排除的目录
+                # prune excluded directories
                 dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
 
-                # 对于每个文件名来说
+                # for every file name
                 for fname in filenames:
-                    # 过滤掉排除的文件名
+                    # skip excluded file names
                     if fname in EXCLUDE_FILES:
                         continue
-                    # 如果文件数量达到最大限制，则截断并跳出循环
+                    # hit the file cap: mark truncation and stop collecting
                     if len(files) >= GREP_MAX_FILES:
                         files_truncated = True
                         break
 
-                    # 构建完整路径
+                    # build the full path
                     full_path = os.path.join(dirpath, fname)
-                    # 如果有 glob 模式，则按文件名（basename）过滤
-                    # 注意不能用 rel（含路径段）匹配：fnmatch 的 '*' 跨 '/'，且无通配符的
-                    # 精确模式（如 "b.py"）会被路径段破坏，导致子目录同名文件被静默滤掉
+                    # with a glob pattern, filter by file name (basename)
+                    # never match on a path with segments: fnmatch '*' crosses
+                    # '/', and an exact pattern without wildcards (e.g. "b.py")
+                    # would be broken by path segments, silently dropping
+                    # same-named files in subdirectories
                     if glob_pattern and not fnmatch.fnmatch(os.path.basename(full_path), glob_pattern):
                         continue
-                    # 添加 当前文件的 full_path 到 files[] 列表中
+                    # append the full path to files[]
                     files.append(full_path)
 
-                # 如果文件收集数量达到最大限制，则跳出循环
+                # stop the walk when the collection cap is hit
                 if files_truncated:
                     break
-        # 捕获目录遍历错误
+        # catch traversal errors
         except OSError as exc:
             if not files:
                 return json.dumps({
@@ -732,71 +787,82 @@ def _grep_io(
                     "message": f"Cannot traverse directory: {exc}"
                 }, ensure_ascii=False)
 
-    # 搜索执行阶段
-    # 拿着上一段收集好的 files 清单，逐个文件读取、跑正则、收集匹配
-    skipped_large_files: list[str] = []             # 超过 GREP_MAX_FILE_SIZE 被跳过的文件（响应里报告）
-    timed_out_files: list[str] = []                 # 正则超时被中断的文件（响应里报告）
-    file_matches: list[dict] = []                   # 匹配结果：每条 {file, line_num, line_text}
-    _content_cache: dict[str, str] = {}             # 内容缓存：{文件路径: 文件内容}
+    # search execution phase
+    # walk the collected files list, read, match and collect per file
+    skipped_large_files: list[str] = []             # files skipped for exceeding GREP_MAX_FILE_SIZE, reported in the response
+    timed_out_files: list[str] = []                 # files interrupted by regex timeout, reported in the response
+    file_matches: list[dict] = []                   # matches, each {file, line_num, line_text}
+    _content_cache: dict[str, str] = {}             # content cache, {file path: file content}
 
-    # 对于 files 列表中 每一个文件来说
+    # for every file in the files list
     for file_path in files:
-        # 搜索超时熔断：预算耗尽后立即停止处理剩余文件
+        # fuse: stop processing remaining files once the budget is exhausted
         if search_timed_out:
             break
         try:
-            # 之前检查过了为什么还要查？
-            # 1. TOCTOU 竞态：文件列表是遍历时收集的，但读取发生在遍历之后。中间如果文件被替换成指向外部的符号链接，
-            #                   收集时的沙箱检查就失效了——"检查时安全，使用时危险"。读取前再查一次，把竞态窗口关死。
-            # 2. 单文件分支漏检：上一段代码 os.path.isfile(real_path) 时直接 files.append，
-            #                   没经过沙箱检查——收集阶段只查了 isfile。所以这里的复查也兜住了单文件路径。
-            # 沙箱检查：确保文件在工作区目录下，并且工作区根目录不能为空，切勿越界
+            # why check again when it was checked before?
+            # 1. TOCTOU race: the file list was collected during traversal
+            #    but reads happen afterwards. If a file was swapped for a
+            #    symlink pointing outside, the sandbox check from collection
+            #    time is stale, safe at check time, dangerous at use time.
+            #    Rechecking before the read closes the race window.
+            # 2. single-file branch gap: the previous section appended
+            #    real_path directly after os.path.isfile without a sandbox
+            #    check, collection only tested isfile. This recheck also
+            #    covers the single-file path.
+            # sandbox check: the file must stay under the workspace root, never escape
             if not allow_external_reads and not os.path.realpath(file_path).startswith(safe_root):
                 continue
 
-            # 跳过大于 GREP_MAX_FILE_SIZE 的文件
+            # skip files larger than GREP_MAX_FILE_SIZE
             if os.path.getsize(file_path) > GREP_MAX_FILE_SIZE:
                 skipped_large_files.append(file_path)
                 continue
 
-            # 二进制嗅探：与 view_file 同一策略，检测头部 NUL 字节；
-            # UTF-16/UTF-32 文本编码天然含 NUL，白名单放行。
-            # grep 是批量扫描，二进制命中视为“读不了”，静默跳过（与解码失败同一语义）
+            # binary sniff: same policy as view_file, NUL bytes in the head;
+            # UTF-16/UTF-32 encodings naturally contain NUL, so they are whitelisted.
+            # grep is a batch scan: a binary hit counts as unreadable and is
+            # silently skipped (same semantics as decode failure)
             with open(file_path, "rb") as f:
                 head = f.read(BINARY_SNIFF_BYTES)
             if b"\x00" in head and not encoding.lower().startswith(("utf-16", "utf-32")):
                 continue
 
-            # 读取文件内容
+            # read the file content
             with open(file_path, "r", encoding=encoding) as f:
                 file_content = f.read()
 
-        # 这里 静默跳过，如果遇到无法解码的文件
+        # silently skip undecodable files
         except UnicodeDecodeError:
             continue
-        # 这里 静默跳过，如果遇到无法读取的文件
+        # silently skip unreadable files
         except OSError:
             continue
-        # 意外异常兜底：regex 库可能抛非 TimeoutError 的异常（如嵌套过深的模式），
-        # 单文件失败静默跳过，不裸炸整个搜索（与解码失败同一策略）
+        # unexpected exception fallback: the regex library may raise
+        # non-TimeoutError exceptions (e.g. overly nested patterns); a single
+        # file failure is skipped silently, never aborting the whole search
         except Exception:
             continue
 
-        # 记下 处理这个文件前 的匹配总数
+        # record the match count before this file
         _matches_before = len(file_matches)
 
-        # 匹配多行的模式下，记录下所有匹配 在 file_matches 列表中
+        # multiline mode: append every match to file_matches
         if multiline:
             try:
                 for _match_i, m in enumerate(re_compiled.finditer(
                         file_content, timeout=REGEX_MATCH_TIMEOUT_SECONDS), 1):
-                    # 总时长预算：每 1024 个匹配查一次墙钟，超时熔断整个搜索（防止海量匹配累计耗时失控）
+                    # budget check: wall clock every 1024 matches, fuse the whole
+                    # search on timeout (huge match counts would otherwise
+                    # accumulate unbounded time)
                     if _match_i % 1024 == 0 and time.monotonic() > _deadline:
                         search_timed_out = True
                         break
                     line_num = file_content[:m.start()].count("\n") + 1
-                    # 取匹配起点所在行的完整文本：匹配可能从行中开始（如 'bar.*foo' 命中行中间），
-                    # group(0) 的首行会丢掉行前缀，必须回源按行边界截取
+                    # the full line at the match start: a match may begin
+                    # mid-line (e.g. 'bar.*foo' hitting the middle of a line),
+                    # group(0) would drop the line prefix, so slice by line
+                    # boundaries from the source
                     line_start = file_content.rfind("\n", 0, m.start()) + 1
                     line_end = file_content.find("\n", m.start())
                     if line_end == -1:
@@ -807,17 +873,21 @@ def _grep_io(
                         "line_num": line_num,
                         "line_text": line_text.rstrip()
                     })
-            #  正则超时熔断， 防止 灾难性回溯，
-            # 就是 (a+)+$ 匹配 "aaaaaaaaaaaaaaaaaaaaaaaab" 这种输入时，回溯次数随输入长度指数爆炸，能让进程卡死几十分钟
+            # per-line regex fuse against catastrophic backtracking,
+            # e.g. (a+)+$ against "aaaaaaaaaaaaaaaaaaaaaaaab" explodes
+            # backtracking exponentially with input length and can hang
+            # the process for tens of minutes
             except TimeoutError:
                 timed_out_files.append(file_path)
         else:
             lines = file_content.split("\n")
 
-            # 遍历每一行，记录匹配结果
+            # walk every line and record matches
             for line_num, line_text in enumerate(lines, start=1):
-                # 总时长预算：每 1024 行查一次墙钟（monotonic 单次 ~100ns，开销可忽略），
-                # 超时熔断整个搜索——单行 2s 超时只防灾难性回溯，防不了海量正常行的累计耗时
+                # budget check: wall clock every 1024 lines (monotonic is
+                # ~100ns per call, negligible); fusing the whole search, the
+                # per-line timeout only guards backtracking, not the
+                # accumulated cost of many normal lines
                 if line_num % 1024 == 0 and time.monotonic() > _deadline:
                     search_timed_out = True
                     break
@@ -828,27 +898,30 @@ def _grep_io(
                             "line_num": line_num,
                             "line_text": line_text.rstrip()
                         })
-                # 防止 灾难性回溯
+                # guard against catastrophic backtracking
                 except TimeoutError:
                     timed_out_files.append(file_path)
                     break
 
-        # 搜索超时：整次调用时间预算耗尽，停止处理剩余文件（返回已收集的部分结果）
+        # search timeout: the whole-call budget is exhausted, stop processing
+        # remaining files (partial results are returned)
         if search_timed_out:
             break
 
-        # 只有 content 模式才消费内容缓存（其他模式只用 file/line_num/line_text），避免白存
+        # only content mode consumes the cache (others use file/line_num/line_text),
+        # avoid caching for nothing
         if output_mode == "content" and len(file_matches) > _matches_before:
             _content_cache[file_path] = file_content
 
-    # 匹配总数（不是文件数）
-    # 一个文件可能贡献多条匹配。它是后续所有逻辑的基准：
-    # 分页（offset >= total_matches 判断）、截断计算（truncated = offset + len(page) < total_matches）、三种 output_mode 的输出。
+    # total match count (not file count): one file may contribute many
+    # matches. It anchors every later decision: paging (offset >=
+    # total_matches), truncation (truncated = offset + len(page) <
+    # total_matches), and the three output modes.
     total_matches = len(file_matches)
 
-    # 如果没有匹配结果，则返回空结果放在 返回体中
+    # no matches: return an empty result body
     if total_matches == 0:
-        # 构建空结果消息 并最后返回
+        # build the empty-result message and return
         msg = f"No matches for '{pattern}' in {len(files)} files"
         if files_truncated:
             msg += f" (file list truncated at {GREP_MAX_FILES})"
@@ -871,27 +944,28 @@ def _grep_io(
             "search_timed_out": search_timed_out,
         }, ensure_ascii=False)
 
-    # 如果分页参数超出范围，则返回错误
+    # paging out of range: return an error
     if offset >= total_matches:
         return json.dumps({
             "status": "error",
             "message": f"offset {offset} exceeds total matches {total_matches}"
         }, ensure_ascii=False)
 
-    # 结果渲染阶段
-    # 搜索执行完（拿到 total_matches），现在把 file_matches 转成三种不同的视图返回给 LLM。
+    # result rendering phase
+    # search done (total_matches known), now render file_matches into one
+    # of three views for the LLM
     page_matches = file_matches[offset:offset + head_limit] if head_limit > 0 else file_matches[offset:]
     truncated = (offset + len(page_matches)) < total_matches
     _page_file_set = {m["file"] for m in page_matches}
     _content_cache = {k: v for k, v in _content_cache.items() if k in _page_file_set}
 
-    # output mode A: 只返回匹配的文件名
+    # output mode A: only the matched file names
     if output_mode == "files_with_matches":
-        # 去重保序
+        # deduplicate while preserving order
         visited_files_set: set[str] = set()
         unique_files_list: list[str] = []
 
-        # 同一文件的多条匹配只保留第一次出现的位置
+        # keep only the first occurrence for each file
         for m in page_matches:
             if m["file"] not in visited_files_set:
                 visited_files_set.add(m["file"])
@@ -912,7 +986,7 @@ def _grep_io(
             "page": {"offset": offset, "limit": head_limit},
         }, ensure_ascii=False)
 
-    # output mode B: 返回匹配的内容出现的文件名和次数
+    # output mode B: matched file names with occurrence counts
     if output_mode == "count":
         file_counts: dict[str, int] = {}
 
@@ -936,24 +1010,28 @@ def _grep_io(
             "page": {"offset": offset, "limit": head_limit},
         }, ensure_ascii=False)
 
-    # output mode C: 返回匹配的文件内容，以及匹配行前后的上下文
+    # output mode C: matched content with context lines around each match
     if output_mode == "content":
-        # 行缓存：同一文件可能有多条匹配，上下文渲染会反复取行，只读一次磁盘。
-        # 取行优先级：先命中搜索阶段的 _content_cache（完整内容已在内存），miss 才回源读盘。
+        # line cache: one file may have many matches and context rendering
+        # repeatedly fetches lines, so read from disk only once.
+        # lookup order: the search-phase _content_cache (full content already
+        # in memory) first, falling back to disk on a miss.
         _file_lines_cache: dict[str, list[str]] = {}
 
         def _get_lines(fp: str) -> list[str]:
-            """按文件路径取行列表，带缓存；读取失败静默返回空列表。
+            """Get the line list for a file path, cached; empty list on read failure.
 
-            取行优先级：先查 _content_cache（搜索阶段已整读的文件），miss 时回源读盘；
-            UnicodeDecodeError / OSError 视为“读不到”，返回空列表让调用方跳过该文件
-            （与搜索阶段的静默跳过策略一致）。
+            Cache priority: _content_cache first (files fully read during
+            the search phase), falling back to disk on a miss.
+            UnicodeDecodeError / OSError count as unreadable and return
+            an empty list so the caller skips the file, matching the
+            silent skip policy of the search phase.
 
             Args:
-                fp: 文件的绝对路径。
+                fp: absolute path of the file.
 
             Returns:
-                该文件按 "\n" 拆分的行列表；读取失败时为空列表。
+                list of lines split on "\n"; empty list when the read fails.
             """
             if fp not in _file_lines_cache:
                 if fp in _content_cache:
@@ -967,7 +1045,8 @@ def _grep_io(
 
             return _file_lines_cache[fp]
 
-        # 按文件分组：同一文件的所有匹配聚在一起，保证每个文件只渲染一次上下文
+        # group by file: all matches of a file stay together, so each file
+        # renders its context once
         file_groups: dict[str, list[dict]] = {}
 
         for m in page_matches:
@@ -976,24 +1055,27 @@ def _grep_io(
 
         results: dict[str, list[list[dict]]] = {}
 
-        # 逐文件渲染：把每条匹配展开成一个“上下文块”（匹配行 + 前后 context_lines 行）
+        # render per file: expand each match into a context chunk (the match
+        # line plus context_lines around it)
         for fp, matches in file_groups.items():
             file_lines = _get_lines(fp)
 
-            # 行列表为空说明文件读不到（或被判定为不可解码），跳过不渲染
+            # an empty line list means the file is unreadable (or undecodable),
+            # skip rendering it
             if not file_lines:
                 continue
 
             chunks: list[list[dict]] = []
 
             for m in matches:
-                # 匹配行号转 0-based 索引，按 context_lines 向两侧扩展，clamp 到文件边界
+                # convert the match line number to 0-based index, expand by
+                # context_lines on both sides, clamp to file bounds
                 line_idx = m["line_num"] - 1
                 start = max(0, line_idx - context_lines)
                 end = min(len(file_lines), line_idx + context_lines + 1)
                 chunk: list[dict] = []
 
-                # 逐行输出：match 标记哪一行是真正的命中行（供 LLM 定位）
+                # emit line by line: match marks the true hit line, for the LLM to locate
                 for i in range(start, end):
                     chunk.append({
                         "line_num": i + 1,
@@ -1003,7 +1085,7 @@ def _grep_io(
 
                 chunks.append(chunk)
 
-            # 最终结构：{绝对路径: [上下文块, ...]}，一个块对应一条匹配
+            # final shape: {absolute path: [context chunks, ...]}, one chunk per match
             results[fp] = chunks
 
         return json.dumps({
@@ -1020,7 +1102,7 @@ def _grep_io(
             "page": {"offset": offset, "limit": head_limit},
         }, ensure_ascii=False)
 
-    # 这个分支不应该被执行，因为前面已经处理了所有可能的 output_mode
+    # this branch is unreachable, every possible output_mode was handled above
     return json.dumps({
         "status": "error",
         "message": f"Invalid output_mode: {output_mode}"
@@ -1040,58 +1122,64 @@ async def grep_tool(
     encoding: str = "utf-8",
     allow_external_reads: bool = False,
 ) -> str:
-    """用正则表达式搜索文件内容。
+    """Search file content with a regular expression.
 
-    执行模型：参数校验、正则预编译与路径安全检查在事件循环内完成（纯 CPU）；
-    文件收集（os.walk）、逐文件读取与正则匹配、结果渲染经 asyncio.to_thread
-    在线程池执行，事件循环不被磁盘 I/O 与 CPU 密集型匹配阻塞。
+    Execution model: argument validation, regex precompilation and path
+    safety checks run on the event loop (pure CPU); file collection
+    (os.walk), per-file reads, regex matching and result rendering run in
+    a thread pool via asyncio.to_thread, keeping disk IO and CPU-heavy
+    matching off the event loop.
 
     Args:
-        pattern:                要搜索的正则表达式。
-        path:                   要搜索的文件或目录（默认 '.'，即工作区根）。
-        glob_pattern:           搜索前按文件名过滤（glob 模式）。
-        output_mode:            输出模式，取值 ``files_with_matches``、``content`` 或 ``count``。
-        context_lines:          每个匹配前后附带的上下文行数（0-10）。
-        head_limit:             最大结果数（0-1000，0 表示不限）。
-        offset:                 跳过前 N 个结果。
-        case_sensitive:         是否区分大小写（默认 True）。
-        multiline:              是否让 ``.`` 匹配换行符（默认 False）。
-        encoding:               文件编码（默认 utf-8）。
-        allow_external_reads:   是否允许搜索工作区以外的目录。
+        pattern:              the regular expression to search for.
+        path:                 file or directory to search, default '.' (workspace root).
+        glob_pattern:         filter files by name before searching (glob pattern).
+        output_mode:          output mode, one of ``files_with_matches``, ``content``, ``count``.
+        context_lines:        context lines around each match (0-10).
+        head_limit:           maximum result count (0-1000, 0 means unlimited).
+        offset:               skip the first N results.
+        case_sensitive:       whether matching is case-sensitive (default True).
+        multiline:            whether ``.`` matches newlines (default False).
+        encoding:             file encoding (default utf-8).
+        allow_external_reads: whether to allow searching outside the workspace.
 
     Returns:
-        包含匹配、计数与分页信息的 JSON。
-        files（files_with_matches）与 results 的键（count/content）均为绝对路径，
-        与 view_file / glob_tool 保持一致。
+        JSON with matches, counts and paging information. The files key
+        (files_with_matches) and the results keys (count/content) are
+        absolute paths, consistent with view_file and glob_tool.
 
     Notes:
-        - 整次搜索受总时长预算限制（GREP_TOTAL_TIMEOUT_SECONDS），超时后返回已收集的
-          部分结果，search_timed_out 为 True 表示结果不完整
-        - 单行正则超时（REGEX_MATCH_TIMEOUT_SECONDS）会熔断该文件，计入 timed_out_files
+        - the whole search has a total time budget
+          (GREP_TOTAL_TIMEOUT_SECONDS); on timeout the partial results
+          already collected are returned with search_timed_out=True
+          meaning the results are incomplete
+        - a per-line regex timeout (REGEX_MATCH_TIMEOUT_SECONDS) fuses
+          that file and counts it in timed_out_files
     """
-    # required 参数检查：如果要匹配的模式为空，则返回错误，参数错误
+    # required check: empty pattern, argument error
     if not pattern or not pattern.strip():
         return json.dumps({
             "status": "error",
             "message": "pattern must not be empty."
         }, ensure_ascii=False)
 
-    # required 参数检查：如果要搜索的路径为空，则返回错误，参数错误
+    # required check: empty path, argument error
     if not path or not path.strip():
         return json.dumps({
             "status": "error",
             "message": "path must not be empty."
         }, ensure_ascii=False)
 
-    # optional 参数检查：glob 模式 必须要为空或非空字符串
+    # optional check: glob_pattern, when given, must be a non-empty string
     if isinstance(glob_pattern, str) and not glob_pattern.strip():
         return json.dumps({
             "status": "error",
             "message": "glob_pattern must not be empty."
         }, ensure_ascii=False)
 
-    # 注意：grep_tool 函数中的 glob_pattern 只是用来减少匹配范围的，不支持复杂的功能 例如 ** 这种
-    # '**' 在 fnmatch（匹配 basename）中与 '*' 等价，没有任何递归语义，直接拒绝避免误导
+    # note: grep_tool glob_pattern only narrows the match scope, it does not
+    # support complex features like **; '**' is equivalent to '*' in fnmatch
+    # (basename matching) with no recursion semantics, reject it to avoid confusion
     if isinstance(glob_pattern, str) and "**" in glob_pattern.split("/"):
         return json.dumps({
             "status": "error",
@@ -1101,8 +1189,9 @@ async def grep_tool(
             )
         }, ensure_ascii=False)
 
-    # glob_pattern 只匹配文件名（basename），拒绝绝对路径与路径穿越组件：
-    # 带 '/' 的模式对 basename 永远匹配不到任何文件，提前报错避免空结果困惑
+    # glob_pattern matches file names (basename) only, reject absolute paths
+    # and traversal components: a pattern with '/' can never match a
+    # basename, fail early instead of returning confusing empty results
     if isinstance(glob_pattern, str):
         if os.path.isabs(glob_pattern):
             return json.dumps({
@@ -1120,8 +1209,9 @@ async def grep_tool(
                     "(matches file names only)."
                 )
             }, ensure_ascii=False)
-        # 兜底：普通相对路径模式（如 "src/*.py"）同样永远匹配不到 basename，
-        # 提示用 path 参数限定目录，而不是在 glob_pattern 里写路径
+        # fallback: a plain relative pattern (e.g. "src/*.py") can never
+        # match a basename either, point the user at the path parameter
+        # instead of embedding directories in glob_pattern
         if "/" in glob_pattern:
             return json.dumps({
                 "status": "error",
@@ -1131,40 +1221,42 @@ async def grep_tool(
                 )
             }, ensure_ascii=False)
 
-    # optional 参数检查：输出模式 必须要在这三个范围之内
+    # optional check: output_mode must be one of the three
     if output_mode not in ("files_with_matches", "content", "count"):
         return json.dumps({
             "status": "error",
             "message": f"Unknown output_mode: '{output_mode}'. Available: files_with_matches | content | count"
         }, ensure_ascii=False)
-        
-    # optional 参数检查：上下文行数 必须是 0-10 的整数
-    # 注意：bool 是 int 的子类，True < 10 成立，必须显式排除
+
+    # optional check: context_lines must be an integer in 0-10
+    # note: bool is an int subclass and True < 10 holds, exclude it explicitly
     if (not isinstance(context_lines, int) or isinstance(context_lines, bool)
             or context_lines < 0 or context_lines > 10):
         return json.dumps({
             "status": "error",
             "message": "context_lines must be an integer between 0 and 10."
         }, ensure_ascii=False)
-        
-    # optional 参数检查：结果限制 必须是 0-1000 的整数（0 表示不限，bool 需排除）
+
+    # optional check: head_limit must be an integer in 0-1000
+    # (0 means unlimited, exclude bool)
     if (not isinstance(head_limit, int) or isinstance(head_limit, bool)
             or head_limit < 0 or head_limit > 1000):
         return json.dumps({
             "status": "error",
             "message": "head_limit must be an integer between 0 and 1000."
         }, ensure_ascii=False)
-        
-    # optional 参数检查：跳过偏移量 必须是非负整数（bool 需排除）
+
+    # optional check: offset must be a non-negative integer (exclude bool)
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         return json.dumps({
             "status": "error",
             "message": "offset must be a non-negative integer."
         }, ensure_ascii=False)
 
-    # 正则合法性校验：提前编译一次供主体逻辑复用（多文件搜索无需每文件重编）。
-    # 注意 multiline 的语义是“让 . 匹配换行符”，对应 re.DOTALL 而非 re.MULTILINE；
-    # case_sensitive=False 时忽略大小写。
+    # validate the regex by compiling once, reused by the main logic (no
+    # per-file recompilation across many files).
+    # note: multiline means "let . match newlines", i.e. re.DOTALL, not
+    # re.MULTILINE; case_sensitive=False enables IGNORECASE.
     try:
         flags = 0
         if not case_sensitive:
@@ -1178,13 +1270,13 @@ async def grep_tool(
             "message": f"Invalid regex pattern: {exc}"
         }, ensure_ascii=False)
 
-    # 获取工作区目录，确保其存在并为绝对路径，注意！这是个极其严重的问题，工作区必须设置，如果未设置则必须立即报错！
+    # get the workspace directory; this is a hard requirement, fail fast when missing
     workspace = settings.workspace_dir
     if not workspace:
         raise RuntimeError("WORKSPACE_DIR is not configured, please set it up.")
     workspace = os.path.abspath(workspace)
 
-    # 在 abspath 基础上，递归解析所有符号链接，返回磁盘上的真实路径
+    # resolve all symlinks on top of abspath, returning the real path on disk
     try:
         safe_root = os.path.realpath(workspace)
     except Exception as exc:
@@ -1193,10 +1285,10 @@ async def grep_tool(
             "message": f"Cannot resolve workspace: {exc}"
         }, ensure_ascii=False)
 
-    # 展开用户主目录
+    # expand the user home directory
     path = os.path.expanduser(path)
 
-    # 拼接 workspace + path 找到搜索路径 `real_path`
+    # join workspace + path to locate the search path `real_path`
     try:
         if not os.path.isabs(path):
             real_path = os.path.realpath(os.path.join(safe_root, path))
@@ -1208,26 +1300,29 @@ async def grep_tool(
             "message": f"Invalid path: {exc}"
         }, ensure_ascii=False)
 
-    # 路径边界归一化，把工作区根统一成 恰好一个结尾分隔符 的格式，防止前缀匹配陷阱. 
+    # normalize the boundary: the workspace root ends with exactly one
+    # separator, preventing prefix-match traps
     safe_root = safe_root.rstrip(os.sep) + os.sep
 
-    # 路径越界检查，确保 file_path 在工作区目录下
+    # boundary check: file_path must stay inside the workspace
     if not allow_external_reads and not (real_path + os.sep).startswith(safe_root):
         return json.dumps({
             "status": "error",
             "message": f"Access to '{path}' is denied."
         }, ensure_ascii=False)
 
-    # 路径存在性检查：path 可以是文件或目录，只查存在，类型分叉由主体逻辑处理
+    # existence check: path may be a file or a directory, only existence is
+    # tested, the type fork is handled by the main logic
     if not os.path.exists(real_path):
         return json.dumps({
             "status": "error",
             "message": f"'{real_path}' does not exist."
         }, ensure_ascii=False)
 
-    # 核心搜索（文件收集 → 逐文件读盘匹配 → 结果渲染）整体丢线程池执行；
-    # GREP_TOTAL_TIMEOUT_SECONDS 总预算与单行超时熔断在 _grep_io 内生效，
-    # 事件循环不被磁盘 I/O 与正则匹配阻塞
+    # the core search (file collection, per-file read and match, result
+    # rendering) runs entirely in a thread pool; the GREP_TOTAL_TIMEOUT_SECONDS
+    # budget and per-line fuse take effect inside _grep_io, keeping disk IO
+    # and regex matching off the event loop
     return await asyncio.to_thread(
         _grep_io,
         real_path, re_compiled, pattern, glob_pattern, output_mode,

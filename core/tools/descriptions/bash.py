@@ -1,8 +1,8 @@
-"""命令行工具集合（_bash）的工具描述
+"""Tool descriptions for the shell command toolset (_bash).
 
-工具表述包括
-- bash                                      执行命令行命令
-- kill_specific_process                     杀死特定进程
+Tools described:
+- bash                     execute a shell command
+- kill_specific_process    kill a specific process
 """
 
 TOOL_DESCRIPTION = {

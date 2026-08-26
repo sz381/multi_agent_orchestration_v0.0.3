@@ -1,9 +1,9 @@
-"""写入工具集合（_fs_mutate）的工具描述
+"""Tool descriptions for the write toolset (_fs_mutate).
 
-工具表述包括
-- str_replace                   替换文件中的精确文本
-- write_file                    创建或覆盖文件的文本
-- clean_dir                     安全地删除工作区内的文件或目录
+Tools described:
+- str_replace    replace exact text in a file
+- write_file     create or overwrite a file's text
+- clean_dir      safely delete files or directories inside the workspace
 """
 
 TOOL_DESCRIPTION = {

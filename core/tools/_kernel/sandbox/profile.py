@@ -1,34 +1,34 @@
-"""生成 macOS Seatbelt 沙箱 profile（供 sandbox-exec 使用）。
+"""Generate macOS Seatbelt sandbox profiles (for sandbox-exec).
 
-提供函数：
-- generate_default:      网络模式 profile（全局读 + 工作区写 + 全网络）
-- generate_air_gapped:   禁网模式 profile（全局读 + 工作区写 + 禁网）
+Functions:
+- generate_default:      network profile (global read + workspace write + full network)
+- generate_air_gapped:   air-gapped profile (global read + workspace write + no network)
 
-策略要点：
-- (deny default)：默认拒绝一切
-- 全局 file-read*：简单且不会漏路径
-- file-write* 仅限工作区 + /tmp 等临时目录
-- 网络全有或全无
+Policy highlights:
+- (deny default): deny everything by default
+- Global file-read*: simple and cannot miss paths
+- file-write* limited to the workspace + temp dirs such as /tmp
+- Network is all-or-nothing
 """
 
 import os
 
 
 def _generate(workspace: str, allow_network: bool = True) -> str:
-    """生成 Seatbelt .sb profile 字符串。
+    """Generate a Seatbelt .sb profile string.
 
-    策略：
-      - (deny default)：默认拒绝一切
-      - 全局 file-read*：简单，不会漏路径
-      - file-write* 仅限工作区 + /tmp
-      - 网络：全有或全无
+    Policy:
+      - (deny default): deny everything by default
+      - Global file-read*: simple, cannot miss paths
+      - file-write* limited to the workspace + /tmp
+      - Network: all-or-nothing
 
     Args:
-        workspace: 工作区根目录绝对路径（读写白名单）。
-        allow_network: True 允许网络，False 完全禁网。
+        workspace: Absolute path of the workspace root (read/write whitelist).
+        allow_network: True allows network, False fully blocks it.
 
     Returns:
-        Seatbelt profile 字符串。
+        The Seatbelt profile string.
     """
     header = "(version 1)\n(deny default)\n"
 
@@ -76,24 +76,24 @@ def _generate(workspace: str, allow_network: bool = True) -> str:
 
 
 def generate_default(workspace: str) -> str:
-    """网络模式：全局读 + 工作区写 + 全网络访问。
+    """Network mode: global read + workspace write + full network access.
 
     Args:
-        workspace: 工作区根目录绝对路径。
+        workspace: Absolute path of the workspace root.
 
     Returns:
-        Seatbelt profile 字符串。
+        The Seatbelt profile string.
     """
     return _generate(workspace, allow_network=True)
 
 
 def generate_air_gapped(workspace: str) -> str:
-    """禁网模式：全局读 + 工作区写 + 禁止网络。
+    """Air-gapped mode: global read + workspace write + no network.
 
     Args:
-        workspace: 工作区根目录绝对路径。
+        workspace: Absolute path of the workspace root.
 
     Returns:
-        Seatbelt profile 字符串。
+        The Seatbelt profile string.
     """
     return _generate(workspace, allow_network=False)

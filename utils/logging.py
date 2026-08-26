@@ -1,16 +1,18 @@
-"""基于 structlog 的结构化日志模块。
+"""Structured logging module based on structlog.
 
-提供：
-- setup_logging()：应用启动时一次性配置日志
-- get_logger()：获取绑定名称的 structlog logger
+Provides:
+- setup_logging():  configure logging once at application startup
+- get_logger():     get a structlog logger bound to a name
 
-关键约束：
-- dev 模式：彩色输出到 stderr
-- 生产模式：JSON 写入 logs/orchestration.log（10MB 轮转 × 5 份）+ 纯文本控制台兜底输出
+Key constraints:
+- dev mode:         colored output to stderr
+- production mode:  JSON to logs/orchestration.log, 10MB rotation with 
+    5 backups, plus plain-text console fallback output
 
-使用注意：
-- setup_logging() 必须在任何 get_logger() 之前调用
-- 获取 logger 必须走 get_logger()（structlog），不要使用标准 logging.getLogger，否则日志会丢失
+Usage notes:
+- setup_logging() must be called before any get_logger()
+- always get loggers via get_logger(), structlog; do not use standard 
+    logging.getLogger, otherwise logs are lost
 """
 
 import logging
@@ -24,19 +26,20 @@ def setup_logging(
     dev_mode: bool = True,
     log_level: int = logging.INFO,
 ) -> None:
-    """应用启动时一次性配置 structlog。
-
-    行为：
-    - dev 模式：彩色 ConsoleRenderer 输出到 stderr，配置后直接返回
-    - 生产模式：处理器链经 ProcessorFormatter 分发，JSON 写入轮转文件，纯文本输出到控制台兜底
-
-    关键约束：
-    - dev 模式不挂载标准 root handler
-    - 生产模式同时挂载文件与控制台两个 handler
-
-    使用注意：
-    - 必须在任何 get_logger() 调用之前执行
-    - 重复调用会重复挂载 handler，应保证仅启动时调用一次
+    """Configure structlog once at application startup.
+    
+    Behavior:
+    - dev mode: colored ConsoleRenderer to stderr, returns right after setup
+    - production mode: handler chain routed via ProcessorFormatter, JSON to a
+      rotating file, plain text to console as fallback
+    
+    Key constraints:
+    - dev mode does not attach standard root handlers
+    - production mode attaches both file and console handlers
+    
+    Usage notes:
+    - must run before any get_logger() call
+    - repeated calls re-attach handlers; call it only once at startup
     """
     timestamper = structlog.processors.TimeStamper(fmt="iso")
 
@@ -92,10 +95,11 @@ def setup_logging(
 
 
 def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
-    """返回绑定到指定名称的 structlog logger。
-
-    使用注意：
-    - 须在 setup_logging() 之后调用，否则无配置效果
-    - 一律使用本函数获取 logger，避免标准 logging.getLogger 导致日志丢失
+    """Return a structlog logger bound to the given name.
+    
+    Usage notes:
+    - call after setup_logging(), otherwise no configuration takes effect
+    - always use this function to get loggers, avoid standard logging.getLogger
+      which causes lost logs
     """
     return structlog.get_logger(name)
