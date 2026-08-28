@@ -39,7 +39,6 @@ from urllib.parse import urlparse
 
 from ddgs import DDGS
 from tavily import TavilyClient
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.content_filter_strategy import PruningContentFilter
@@ -47,7 +46,7 @@ from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 from utils.settings import settings
 from utils.logging import get_logger
-from core.agents.model import ainvoke_with_content_guard
+from core.agents.model import init_model, ainvoke_with_content_guard
 from core.prompts.system_prompt_webpage_summarizer import WEB_SUMMARIZE_TEMPLATE
 from core.tools._kernel.constants import (
     MAX_QUERY_LENGTH,
@@ -192,13 +191,11 @@ async def _summarize_with_llm(
     # run the summary
     logger.debug("web_summarize_start", content_len=len(content), model=settings.deepseek_model_name)
     try:
-        summarizer = ChatOpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
-            model=settings.deepseek_model_name,
-            streaming=False,
+        summarizer = init_model(
+            model_name=settings.deepseek_model_name,
             temperature=0.0,
             max_tokens=5000,
+            streaming=False,
         )
         text = WEB_SUMMARIZE_TEMPLATE.format(prompt=prompt, content=content)
 

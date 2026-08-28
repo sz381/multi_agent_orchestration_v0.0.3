@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     xiaomi_mimo_base_url: str = "https://api.xiaomimimo.com/v1"
     xiaomi_mimo_model_name: str = "mimo-v2.5"
 
+    glm_api_key: str | None = None
+    glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    glm_model_name: str = "glm-5.3-flash"
+
     tavily_api_key: str | None = None
 
     workspace_dir: str | None = None

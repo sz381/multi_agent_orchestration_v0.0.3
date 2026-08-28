@@ -48,6 +48,9 @@ def init_model(
     elif model_name.startswith("mimo"):
         api_key = settings.xiaomi_mimo_api_key
         base_url = settings.xiaomi_mimo_base_url
+    elif model_name.startswith("glm"):
+        api_key = settings.glm_api_key
+        base_url = settings.glm_base_url
     else:
         raise ValueError(f"Unknown model name: {model_name}")
         
