@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 
 from core.agents.graph import build_graph
 from core.tools._kernel._web import close_crawler
+from core.middleware.orchestration_callback import OrchestrationCallBack
 from utils.logging import setup_logging, get_logger
 from utils.console import render_plan_block, render_fanout_block
 
@@ -19,11 +20,8 @@ setup_logging(dev_mode=True, log_level=logging.DEBUG)
 logger = get_logger(__name__)
 
 TEST_QUERY = """
-请测试计划类工具，按顺序尽情调用（删除后要保留至少一个阶段）：
-1. make_plan：创建一份 3 个阶段的执行计划，阶段内容自拟
-2. edit_plan：修改其中一个阶段的 phase_name 或 phase_status
-3. delete_plan：删除其中一个阶段
-每个工具调用后，用一句话说明结果。
+测试控制工具互斥：请在同一个回复中同时调用 make_plan 和 edit_plan
+（必须同一轮、一次输出两个工具调用，不要分开调用）。
 """
 
 def _safe_initial_state(**overrides) -> dict:
@@ -99,7 +97,8 @@ def _handle_updates(data: dict, header_ref: list):
 
 
 async def main():
-    graph = build_graph()
+    callback_handler = OrchestrationCallBack()
+    graph = build_graph(callback_handler)
     state = _safe_initial_state(
         user_query=TEST_QUERY,
         conversation_id="demo_001",
@@ -113,7 +112,10 @@ async def main():
 
     async for mode, data in graph.astream(
         state,
-        config={"configurable": {"thread_id": state["conversation_id"]}},
+        config={
+            "configurable": {"thread_id": state["conversation_id"]},
+            "callbacks": [callback_handler],
+        },
         stream_mode=["updates", "messages"],
     ):
         if mode == "updates":

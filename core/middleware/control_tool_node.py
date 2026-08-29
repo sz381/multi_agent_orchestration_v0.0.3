@@ -54,6 +54,7 @@ class ControlAwareToolNode(ToolNode):
         tools: Sequence[BaseTool],
         *,
         control_tool_names: set[str],
+        callback_handler: Any | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize ControlAwareToolNode.
@@ -64,11 +65,15 @@ class ControlAwareToolNode(ToolNode):
             control_tool_names: set of control tool names; tools in this set
                 are exclusive per turn, only the first control call runs when
                 one appears, all other calls are rejected.
+            callback_handler: optional handler exposing discard_rejected_tool_calls(rejected_calls), 
+                invoked when calls are rejected so their ctx entries are cleaned; None keeps ToolNode behaviour.
             **kwargs: other arguments passed through to ToolNode, such as
                 name or messages_key.
         """
         super().__init__(tools, **kwargs)
         self._control_tool_names = frozenset(control_tool_names)
+        self._callback_handler = callback_handler
+        
 
     def _filter_control_calls(
         self, tool_calls: list[dict]
@@ -196,6 +201,9 @@ class ControlAwareToolNode(ToolNode):
         # append rejection messages for rejected calls so every tool_call has a response
         outputs.extend(self._reject_message(call) for call in rejected_calls)
 
+        if self._callback_handler is not None and rejected_calls:
+            self._callback_handler.discard_rejected_tool_calls(rejected_calls)
+
         return self._combine_tool_outputs(outputs, input_type)
 
     def _func(
@@ -259,5 +267,10 @@ class ControlAwareToolNode(ToolNode):
 
         # append rejection messages for rejected calls so every tool_call has a response
         outputs.extend(self._reject_message(call) for call in rejected_calls)
+
+        # notify the handler to drop ctx entries of rejected calls: they never
+        # execute, on_tool_start never fires, nobody else would clean them up
+        if self._callback_handler is not None and rejected_calls:
+            self._callback_handler.discard_rejected_tool_calls(rejected_calls)
 
         return self._combine_tool_outputs(outputs, input_type)

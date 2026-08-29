@@ -8,15 +8,16 @@ Provides:
 from langchain_core.messages import SystemMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from core.agents.state import OrchestrationState
 from core.prompts.system_prompt_orchestrator import ORCHESTRATOR_SYSTEM_PROMPT
 from core.tools.bundles.orchestrator import ORCHESTRATOR_BASE_TOOLS, ORCHESTRATOR_HARD_STOP_TOOLS
-from core.tools.bundles.orchestrator import end_orchestration, edit_plan, delete_plan
 from core.agents.constants import (
     ORCHESTRATOR_MAX_ITERATIONS,
     ORCHESTRATOR_ITERATION_BUDGET,
 )
+from core.agents.state import OrchestrationState
 from core.agents.model import init_model, ainvoke_with_content_guard
+from core.middleware.constants import AGENT_ROLE_ORCHESTRATOR
+from core.middleware.identity_injection import bind_identity
 from utils.settings import settings
 from utils.logging import get_logger
 
@@ -145,12 +146,21 @@ def make_orchestrator_node():
     """
     async def orchestrator_node(state: OrchestrationState, config: RunnableConfig) -> dict:
         # log the start of the orchestrator node call
-        logger.info(
-            "orchestrator_node_called",
+        logger.debug(
+            "orchestrator_called",
             agent_name="orchestrator",
             agent_id="orchestrator",
             iteration=state["orchestration_iteration"],
             sub_agent_cnt_active=state.get("active_sub_agent_count", "N/A"),
+        )
+
+        # bind the orchestrator identity so every LLM/tool event can be 
+        # attributed by the orchestration callback
+        config = bind_identity(
+            config,
+            agent_name="orchestrator",
+            agent_id="orchestrator",
+            agent_role=AGENT_ROLE_ORCHESTRATOR,
         )
 
         # inject the workspace directory into the system prompt

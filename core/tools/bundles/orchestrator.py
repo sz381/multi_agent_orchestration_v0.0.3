@@ -338,8 +338,22 @@ ORCHESTRATOR_BASE_TOOLS = [
     delete_plan,
 ]
 
+# this is the tools set when the agents(orchestrator) are reaching to the limit of iteration
+# after the budget, 45 iterations count for now, the only tools that it will possess are for the ending of the iteration
 ORCHESTRATOR_HARD_STOP_TOOLS = [
     end_orchestration, 
     edit_plan, 
     delete_plan
 ]
+
+# different agents may have different set of control tools,
+# for example, orchestrator has `fanout_subagents`, but the programmer subagent doesn't have `fanout_subagents` tools
+# we need to make them distingushable from the bundle layers
+ORCHESTRATOR_CONTROL_TOOL_NAME_SET: set[str] = {
+    "make_plan",
+    "edit_plan",
+    "delete_plan",
+    "fanout_subagents",
+    "pause_orchestration",
+    "end_orchestration",
+}
