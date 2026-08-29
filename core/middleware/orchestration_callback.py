@@ -119,7 +119,8 @@ class OrchestrationCallBack(AsyncCallbackHandler):
 
         Pops the identity from _llm_ctx and registers it in _tool_call_ctx
         for every tool call of the response, so each child tool run can
-        claim its owner later by tool_call_id.
+        claim its owner later by tool_call_id. Also logs the token usage
+        bill of this run.
         """
         # clean the llm_ctx to avoid infinite growth after the usage
         # Extract identity from llm_ctx using run_id, and check for its existence
@@ -150,6 +151,41 @@ class OrchestrationCallBack(AsyncCallbackHandler):
             agent_id=identity[AGENT_ID],
             tool_call_cnt=len(tool_calls),
             tool_calls=[call['name'] for call in tool_calls],
+            run_id=str(run_id),
+        )
+
+        # log the token usage bill for billing purposes
+        # when the bill is missing, degrade to a warning instead of raising,
+        # a lost bill degrades observation, it must not break the run
+        usage = msg.usage_metadata
+        if not usage:
+            logger.warning(
+                "llm_token_usage_missing",
+                agent_name=identity[AGENT_NAME],
+                agent_id=identity[AGENT_ID],
+                run_id=str(run_id),
+            )
+            return
+
+        input_details = usage.get("input_token_details", {})
+        cache_read_tokens = input_details.get("cache_read", 0)
+        cache_creation_tokens = input_details.get("cache_creation", 0)
+        input_tokens = usage.get("input_tokens", 0)
+        if input_tokens > 0:
+            cache_hit_rate = round(cache_read_tokens / input_tokens, 4)
+        else:
+            cache_hit_rate = 0.0
+
+        logger.debug(
+            "llm_token_usage",
+            agent_name=identity[AGENT_NAME],
+            agent_id=identity[AGENT_ID],
+            input_tokens=input_tokens,
+            output_tokens=usage.get("output_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            cache_hit_rate=cache_hit_rate,
             run_id=str(run_id),
         )
 

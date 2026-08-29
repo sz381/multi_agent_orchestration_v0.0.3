@@ -61,6 +61,7 @@ def init_model(
         temperature=temperature,
         max_tokens=max_tokens,
         streaming=streaming,
+        stream_usage=True,
     )
 
 
