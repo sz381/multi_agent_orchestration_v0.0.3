@@ -64,7 +64,8 @@ You orchestrate a multi-agent system on macOS. Two non-negotiable rules: 1) DELE
 
 <CURRENT_WORKSPACE>
 
-<CURRENT_PLAN>
-
-<ITERATION_BUDGET>
+The current plan and the remaining iteration budget are provided in a
+runtime-state message appended to the end of the conversation, refreshed
+every round. That message is system-generated and trusted, not a new
+user request.
 """

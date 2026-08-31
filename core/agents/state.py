@@ -1,9 +1,9 @@
 """LangGraph state definitions for the orchestrator graph.
 
 Provides:
-- Plan
-- SubAgentRoundTaskItem
-- OrchestrationState
+- Plan                          Single phase in the orchestrator execution plan.
+- SubAgentRoundTaskItem         One task assigned to a sub-agent in a fan-out round.
+- OrchestrationState            Top-level state of the orchestrator graph.
 """
 
 import operator
@@ -11,7 +11,7 @@ from typing import TypedDict, Annotated, NotRequired
 
 from langgraph.graph.message import add_messages
 
-from utils.common import _merge_round_tasks
+from core.agents.utils import merge_round_tasks
 
 
 class Plan(TypedDict):
@@ -65,6 +65,8 @@ class OrchestrationState(TypedDict):
         should_orchestration_pause:     flag to pause and wait for human input, HITL.
         should_orchestration_stop:      flag to stop the orchestration, HITL.
         response:                       the final response to deliver to the user.
+        prompt_tokens:                  current prompt token usage counter.
+        completion_tokens:              current completion token usage counter.
         total_tokens:                   current token usage counter.
         start_at:                       ISO timestamp of when the orchestration started.
         time_elapsed:                   total elapsed time in seconds.
@@ -76,13 +78,15 @@ class OrchestrationState(TypedDict):
     user_query: str
     plan: Annotated[list[Plan] | None, lambda _left, right: right]
     active_sub_agent_count: Annotated[int, operator.add]
-    sub_agent_round_tasks: Annotated[list[SubAgentRoundTaskItem], _merge_round_tasks]
+    sub_agent_round_tasks: Annotated[list[SubAgentRoundTaskItem], merge_round_tasks]
     sub_agent_outputs: Annotated[dict, lambda left, right: {**left, **right}]
     orchestration_status: str
     orchestration_iteration: int
     should_orchestration_pause: bool
     should_orchestration_stop: bool
     response: Annotated[str, lambda _left, right: right]
+    prompt_tokens: Annotated[int, operator.add]
+    completion_tokens: Annotated[int, operator.add]
     total_tokens: Annotated[int, operator.add]
     start_at: str
     time_elapsed: float

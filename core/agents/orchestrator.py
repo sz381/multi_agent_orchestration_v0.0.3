@@ -5,7 +5,7 @@ Provides:
 - make_interrupt_node:              factory returning the interrupt node for HITL
 """
 
-from langchain_core.messages import SystemMessage, AIMessage
+from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from core.prompts.system_prompt_orchestrator import ORCHESTRATOR_SYSTEM_PROMPT
@@ -18,123 +18,15 @@ from core.agents.state import OrchestrationState
 from core.agents.model import init_model, ainvoke_with_content_guard
 from core.middleware.constants import AGENT_ROLE_ORCHESTRATOR
 from core.middleware.identity_injection import bind_identity
+from core.agents.utils import (
+    build_state_snapshot,
+    check_iteration_limit,
+    inject_workspace_dir,
+)
 from utils.settings import settings
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-def _inject_workspace_dir(system_content: str) -> str:
-    """Inject the current workspace directory into the system prompt
-
-    Args:
-        system_content:     the original system prompt template.
-
-    Returns:
-        the system prompt with <CURRENT_WORKSPACE> replaced by the actual path.
-    """
-    return system_content.replace(
-        "<CURRENT_WORKSPACE>",
-        f"<CURRENT_WORKSPACE>\n"
-            f"Your workspace root is: {settings.workspace_dir}\n"
-        f"</CURRENT_WORKSPACE>",
-    )
-
-
-def _inject_plan(system_content: str, plan: list[dict]) -> str:
-    """Inject the current plan status into the system prompt
-
-    Args:
-        system_content: the system prompt after workspace injection.
-        plan:           the plan list of phase dicts, each with
-                        phase_id, phase_name, phase_status.
-
-    Returns:
-        the system prompt with the plan injected into <CURRENT_PLAN>;
-        a note saying no plan is set when the plan is empty.
-    """
-    if not plan:
-        return system_content.replace(
-            "<CURRENT_PLAN>",
-            "<CURRENT_PLAN>\n"
-                "You haven't set any plan yet\n"
-            "</CURRENT_PLAN>",
-        )
-
-    lines = []
-    for p in plan:
-        icon = {"pending": "○", "in_progress": "◐", "done": "●"}[p["phase_status"]]
-        lines.append(
-            f"  {icon} [{p['phase_id']}] {p['phase_name']}"
-        )
-    lines.append("")
-    lines.append(
-        "Before ending, verify ALL phases are ●. "
-        "If any are ○ or ◐, you MUST act on them first."
-    )
-    plan_content = "\n".join(lines)
-
-    return system_content.replace(
-        "<CURRENT_PLAN>",
-        f"<CURRENT_PLAN>\n"
-            f"{plan_content}\n"
-        f"</CURRENT_PLAN>",
-    )
-
-
-def _inject_iteration_budget(system_content: str, iteration: int) -> str:
-    """Inject the remaining iteration budget into the system prompt
-
-    Args:
-        system_content: the system prompt after plan injection.
-        iteration:      iterations consumed, zero-based.
-
-    Returns:
-        the system prompt with live budget info so the model stays aware
-        of the remaining budget and enters closeout mode when exhausted.
-    """
-    remaining = max(0, ORCHESTRATOR_ITERATION_BUDGET - iteration)
-
-    if remaining <= 0:
-        return system_content.replace(
-            "<ITERATION_BUDGET>",
-            f"<ITERATION_BUDGET>\n"
-                f"You are PAST your ~{ORCHESTRATOR_ITERATION_BUDGET}-iteration work budget. "
-                f"You are now in CLOSEOUT MODE. "
-                f"Do NOT start or continue task work. "
-                f"Only reconcile the plan with edit_plan/delete_plan if necessary, "
-                f"then call end_orchestration as soon as possible.\n"
-            f"</ITERATION_BUDGET>",
-        )
-
-    return system_content.replace(
-        "<ITERATION_BUDGET>",
-        f"<ITERATION_BUDGET>\n"
-            f"Iterations consumed: {iteration} / ~{ORCHESTRATOR_ITERATION_BUDGET}. "
-            f"Remaining: ~{remaining}. Verify with tests, then close out.\n"
-        f"</ITERATION_BUDGET>",
-    )
-
-
-def _check_iteration_limit(state: OrchestrationState) -> bool:
-    """Check whether the orchestrator has reached the max iteration count
-
-    Args:
-        state: the orchestrator state.
-
-    Returns:
-        True if the iteration limit is reached.
-    """
-    iteration_cnt = state["orchestration_iteration"] + 1
-    hit_limit = iteration_cnt >= ORCHESTRATOR_MAX_ITERATIONS
-
-    if hit_limit:
-        logger.warning(
-            "orchestrator_iteration_limit_reached",
-            iteration_cnt=iteration_cnt,
-        )
-
-    return hit_limit
 
 
 def make_orchestrator_node():
@@ -165,32 +57,35 @@ def make_orchestrator_node():
 
         # inject the workspace directory into the system prompt
         try:
-            system_content = _inject_workspace_dir(ORCHESTRATOR_SYSTEM_PROMPT)
+            system_content = inject_workspace_dir(ORCHESTRATOR_SYSTEM_PROMPT)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to inject workspace: {e.__class__.__name__}: {e}"
             ) from e
 
-        # inject the plan into the system prompt
+        # build the state snapshot: plan and budget leave the system prompt
+        # and move to the tail of the messages, keeping the system prompt
+        # byte-stable across rounds for the prefix cache
         try:
-            system_content = _inject_plan(system_content, state["plan"])
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to inject plan: {e.__class__.__name__}: {e}"
-            ) from e
-
-        # inject the iteration budget into the system prompt
-        try:
-            system_content = _inject_iteration_budget(
-                system_content, state["orchestration_iteration"]
+            snapshot_content = build_state_snapshot(
+                state["plan"],
+                state["orchestration_iteration"],
+                AGENT_ROLE_ORCHESTRATOR,
+                budget=ORCHESTRATOR_ITERATION_BUDGET,
             )
         except Exception as e:
             raise RuntimeError(
-                f"Failed to inject iteration budget: {e.__class__.__name__}: {e}"
+                f"Failed to build state snapshot: {e.__class__.__name__}: {e}"
             ) from e
 
-        # prepend the system message to the existing messages
-        messages = [SystemMessage(content=system_content)] + list(state["messages"])
+        # system message first, then history, then the tail state snapshot;
+        # HumanMessage so DeepSeek persists the cache unit at the
+        # user-input boundary of every request
+        messages = (
+            [SystemMessage(content=system_content)]
+            + list(state["messages"])
+            + [HumanMessage(content=snapshot_content)]
+        )
 
         # TODO: deferred for now
         # request pre-context pipeline: process the injected context before
@@ -203,13 +98,21 @@ def make_orchestrator_node():
             max_tokens=16384,
             streaming=True,
         )
-        if not _check_iteration_limit(state):
-            model = model.bind_tools(ORCHESTRATOR_BASE_TOOLS)
-        else:
+        hit_limit = check_iteration_limit(
+            state["orchestration_iteration"],
+            max_iterations=ORCHESTRATOR_MAX_ITERATIONS,
+        )
+        if hit_limit:
+            logger.warning(
+                "orchestrator_iteration_limit_reached",
+                iteration_cnt=state["orchestration_iteration"] + 1,
+            )
             # iteration limit reached: bind only end_orchestration, edit_plan, delete_plan
             # end_orchestration fails if a plan still exists, so the orchestrator
             # must edit or delete the plan before ending the orchestration
             model = model.bind_tools(ORCHESTRATOR_HARD_STOP_TOOLS)
+        else:
+            model = model.bind_tools(ORCHESTRATOR_BASE_TOOLS)
 
         # call the LLM
         try:
@@ -217,7 +120,10 @@ def make_orchestrator_node():
                 model, messages, config=config, role="orchestrator"
             )
             return {
-                "messages": [response],
+                "messages": [
+                    HumanMessage(content=snapshot_content),
+                    response,
+                ],
                 "orchestration_iteration": state["orchestration_iteration"] + 1,
             }
         except Exception as e:
