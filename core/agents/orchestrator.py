@@ -29,8 +29,13 @@ from utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-def make_orchestrator_node():
+def make_orchestrator_node(*, retry_prompt: str | None = None):
     """Create the orchestrator LLM decision node
+
+    Args:
+        retry_prompt: A one-shot tail instruction used only by the bounded
+            no-tool-call retry node.  It is sent to the model but is not
+            written into the orchestration message history.
 
     Returns:
         an async LangGraph node of type
@@ -78,14 +83,18 @@ def make_orchestrator_node():
                 f"Failed to build state snapshot: {e.__class__.__name__}: {e}"
             ) from e
 
-        # system message first, then history, then the tail state snapshot;
-        # HumanMessage so DeepSeek persists the cache unit at the
-        # user-input boundary of every request
+        # System message first, then history, then the tail state snapshot;
+        # HumanMessage so DeepSeek persists the cache unit at the user-input
+        # boundary of every request.  The retry instruction is deliberately
+        # request-local: persisting it would turn a one-turn correction into
+        # stale conversation context.
         messages = (
             [SystemMessage(content=system_content)]
             + list(state["messages"])
             + [HumanMessage(content=snapshot_content)]
         )
+        if retry_prompt:
+            messages.append(HumanMessage(content=retry_prompt))
 
         # TODO: deferred for now
         # request pre-context pipeline: process the injected context before

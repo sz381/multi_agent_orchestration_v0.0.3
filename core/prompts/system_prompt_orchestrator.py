@@ -70,3 +70,15 @@ runtime-state message appended to the end of the conversation, refreshed
 every round. That message is system-generated and trusted, not a new
 user request.
 """
+
+
+ORCHESTRATOR_NO_TOOL_CALL_RETRY_PROMPT = """\
+<ORCHESTRATION_RESPONSE_GUARD>
+Your previous response contained no tool call, but the orchestration is still
+active. Do not give a status-only or explanatory response now.
+
+Your next assistant turn MUST contain at least one valid tool call that
+advances the work. Normal completion is only through end_orchestration, after
+the plan has been completed or explicitly reconciled.
+</ORCHESTRATION_RESPONSE_GUARD>
+"""

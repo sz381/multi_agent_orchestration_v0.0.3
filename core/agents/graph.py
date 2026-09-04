@@ -13,6 +13,9 @@ from core.agents.state import OrchestrationState
 from core.agents.constants import MAX_RESULT_SUMMARY_CHARS, SUB_AGENT_RESULT_PREFIX
 from core.agents.announce import make_announce_node
 from core.agents.orchestrator import make_orchestrator_node, make_interrupt_node
+from core.prompts.system_prompt_orchestrator import (
+    ORCHESTRATOR_NO_TOOL_CALL_RETRY_PROMPT,
+)
 from core.agents.workers.worker_registry import (
     PROGRAMMER_GRAPH,
     RESEARCHER_GRAPH,
@@ -54,16 +57,22 @@ def _orchestrator_tool_call_detected(state: OrchestrationState) -> bool:
 def _route_after_orchestrator(state: OrchestrationState) -> str:
     """Route the orchestrator after an LLM step.
 
-    Priority: human-in-the-loop pause, explicit stop, then tool-call
-    continuation; otherwise the orchestration is complete.
+    A normal completion is represented by end_orchestration writing response
+    in the tool node.  A text-only LLM response is therefore not completion:
+    it receives one prompt-guided retry before becoming an explicit failure.
 
     Returns:
-        "interrupt", "tools", or END.
+        "interrupt", "tools", "orchestrator_retry", or END.
     """
     if state.get("should_orchestration_pause"):
         return "interrupt"
 
     if state.get("should_orchestration_stop"):
+        return END
+
+    # An invocation failure already surfaced its error_message in the node
+    # update. Do not mistake it for a recoverable text-only LLM response.
+    if state.get("error_message"):
         return END
 
     if _orchestrator_tool_call_detected(state):
@@ -72,7 +81,79 @@ def _route_after_orchestrator(state: OrchestrationState) -> str:
     if state.get("response"):
         return END
 
-    return "orchestrator"
+    return "orchestrator_retry"
+
+
+def _route_after_orchestrator_retry(state: OrchestrationState) -> str:
+    """Route the single correction attempt after a no-tool-call response.
+
+    The retry node receives the normal orchestrator context plus a one-shot
+    prompt requiring a tool call.  It may continue through the ordinary tool
+    path, honor a control-flow flag, or fail explicitly when the correction
+    attempt also returns only text.  Unlike the initial router, this function
+    never schedules another retry.
+
+    Args:
+        state: Current orchestration state after the retry LLM node has
+            appended its response.
+
+    Returns:
+        "interrupt" when a HITL pause is requested; "tools" when the retry
+        response contains tool calls; "orchestration_failure" when it does
+        not; or END when an explicit stop or invocation error is present.
+    """
+    if state.get("should_orchestration_pause"):
+        return "interrupt"
+
+    if state.get("should_orchestration_stop"):
+        return END
+
+    if state.get("error_message"):
+        return END
+
+    if _orchestrator_tool_call_detected(state):
+        return "tools"
+
+    return "orchestration_failure"
+
+
+def _orchestration_failure_after_no_tool_retry(state: OrchestrationState) -> dict:
+    """Produce the terminal state update for an exhausted no-tool retry.
+
+    A normal orchestration may only finish through end_orchestration.  This
+    node handles the separate exceptional case where both the initial LLM
+    response and the one prompt-guided retry omitted tool calls.  It leaves
+    the plan untouched, records a failed status, and makes the remaining
+    phase ids visible to the runner and logs.
+
+    Args:
+        state: Current orchestration state after the retry response without
+            tool calls.
+
+    Returns:
+        State updates setting orchestration_status to "failed" and
+        error_message to a diagnostic that names unfinished plan phases.
+    """
+    incomplete_phase_ids = [
+        str(phase.get("phase_id", "unknown"))
+        for phase in state.get("plan") or []
+        if phase.get("phase_status") != "done"
+    ]
+    error_message = (
+        "Orchestration stopped: the orchestrator twice returned without a "
+        "tool call (including the one bounded retry). No successful "
+        "end_orchestration was executed. Incomplete phases: "
+        f"{', '.join(incomplete_phase_ids) or 'none'}."
+    )
+    logger.error(
+        "orchestrator_no_tool_call_retry_exhausted",
+        iteration=state.get("orchestration_iteration"),
+        incomplete_phase_ids=incomplete_phase_ids,
+    )
+    return {
+        "orchestration_status": "failed",
+        "error_message": error_message,
+    }
 
 
 def _build_sub_agent_send(task: dict) -> Send:
@@ -352,6 +433,9 @@ def build_graph(callback_handler: OrchestrationCallBack):
     builder = StateGraph(OrchestrationState)
 
     orchestrator_node = make_orchestrator_node()
+    orchestrator_retry_node = make_orchestrator_node(
+        retry_prompt=ORCHESTRATOR_NO_TOOL_CALL_RETRY_PROMPT,
+    )
     interrupt_node = make_interrupt_node()
     announce_node = make_announce_node()
     tool_node = ControlAwareToolNode(
@@ -361,6 +445,11 @@ def build_graph(callback_handler: OrchestrationCallBack):
     )
 
     builder.add_node("orchestrator", orchestrator_node)
+    builder.add_node("orchestrator_retry", orchestrator_retry_node)
+    builder.add_node(
+        "orchestration_failure",
+        _orchestration_failure_after_no_tool_retry,
+    )
     builder.add_node("tools", tool_node)
     builder.add_node("interrupt", interrupt_node)
     builder.add_node("announce", announce_node)
@@ -377,6 +466,7 @@ def build_graph(callback_handler: OrchestrationCallBack):
     builder.add_edge(START, "orchestrator")
     builder.add_edge("interrupt", "orchestrator")
     builder.add_edge("announce", END)
+    builder.add_edge("orchestration_failure", END)
 
     for name in SUBAGENT_MAP:
         builder.add_edge(name, "collect_sub_agent_results")
@@ -396,6 +486,18 @@ def build_graph(callback_handler: OrchestrationCallBack):
         {
             "tools": "tools",
             "interrupt": "interrupt",
+            "orchestrator_retry": "orchestrator_retry",
+            END: END,
+        },
+    )
+
+    builder.add_conditional_edges(
+        "orchestrator_retry",
+        _route_after_orchestrator_retry,
+        {
+            "tools": "tools",
+            "interrupt": "interrupt",
+            "orchestration_failure": "orchestration_failure",
             END: END,
         },
     )
