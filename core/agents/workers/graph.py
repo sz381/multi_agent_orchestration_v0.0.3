@@ -14,9 +14,9 @@ from langchain_core.messages import AIMessage
 
 from core.middleware.control_tool_node import ControlAwareToolNode
 from core.agents.workers.state import SubAgentState
-from core.agents.workers.nodes.prepare import make_prepare_node
-from core.agents.workers.nodes.llm import make_llm
-from core.agents.workers.nodes.summarize import make_summarize
+from core.agents.workers.prepare import make_prepare_node
+from core.agents.workers.llm import make_llm
+from core.agents.workers.summarize import make_summarize
 
 
 def _build_react_graph(
