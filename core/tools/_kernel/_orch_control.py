@@ -77,7 +77,8 @@ def end_orchestration(
     from langgraph.types import Command.
 
     Args:
-        response: final answer string, the "response" field in StateGraph.
+        response: handoff note string for the final announcer, the
+            "response" field in StateGraph.
         current_response: current value of the "response" field in
             StateGraph; non-empty means already called this round,
             guarding against concurrent last-win.

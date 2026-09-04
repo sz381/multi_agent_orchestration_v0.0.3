@@ -8,13 +8,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from core.agents.constants import (
+    LLM_IDENTITY_FIELDS,
     SUB_AGENT_MAX_ITERATIONS,
     SUB_AGENT_ITERATION_BUDGET,
 )
 from core.middleware.constants import SUB_AGENT_ROLES
 from core.middleware.identity_injection import bind_identity
 from core.agents.utils import (
-    LLM_IDENTITY_FIELDS,
     build_state_snapshot,
     check_iteration_limit,
     validate_identity,
@@ -24,7 +24,6 @@ from utils.settings import settings
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
-
 
 def make_llm(tools: list | None = None):
     """Create a sub-agent LLM node function
@@ -50,13 +49,15 @@ def make_llm(tools: list | None = None):
         identity = validate_identity(state, LLM_IDENTITY_FIELDS)
         sub_agent_name = identity["sub_agent_name"]
 
-        # sub_agent_name, agent_role for bind_identity; unknown names fail closed
-        role_by_name = {role: role for role in SUB_AGENT_ROLES}
-        role = role_by_name.get(sub_agent_name)
-        if role is None:
+        # role derives from the sub_agent_id prefix, the same source as the
+        # Send dispatch in _build_sub_agent_send; sub_agent_name is a display
+        # label chosen by the orchestrator and must not drive role mapping
+        role = identity["sub_agent_id"].split("_", 1)[0]
+        if role not in SUB_AGENT_ROLES:
             raise RuntimeError(
-                f"Unknown sub-agent name for role mapping: {sub_agent_name!r}; "
-                f"expected one of {sorted(role_by_name)}"
+                f"Unknown sub-agent role from sub_agent_id "
+                f"{identity['sub_agent_id']!r}; expected one of "
+                f"{sorted(SUB_AGENT_ROLES)}"
             )
 
         # bind the identity so every LLM/tool event can be attributed

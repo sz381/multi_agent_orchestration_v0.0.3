@@ -16,6 +16,8 @@ Constants provided:
 - SUMMARIZE_IDENTITY_FIELDS:          identity fields for summarize node
 - FILE_PRODUCING_TOOLS:               file-producing tool to arg-name mapping
 - MAX_FILES_SHOWN:                    max artifacts shown in console block   default 20
+- SUB_AGENT_RESULT_PREFIX:            sub-agent result prefix in parent messages
+- MAX_RESULT_SUMMARY_CHARS:           max chars of injected result summary   default 1500
 """
 
 import ssl
@@ -100,3 +102,7 @@ FILE_PRODUCING_TOOLS = {
 }
 
 MAX_FILES_SHOWN = 100
+
+# core/agents/graph.py
+SUB_AGENT_RESULT_PREFIX = "[SUB-AGENT RESULT]"
+MAX_RESULT_SUMMARY_CHARS = 1500

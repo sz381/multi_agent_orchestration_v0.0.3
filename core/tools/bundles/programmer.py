@@ -206,7 +206,7 @@ async def web_fetch(
 
 @tool("make_plan", description=PLAN_DESCRIPTION["make_plan"])
 def make_plan(phases: list[dict], runtime: ToolRuntime) -> Command | str:
-    result = _make_plan(phases, existing_plan=runtime.state.get("plan") or [])
+    result = _make_plan(phases, existing_plan=runtime.state.get("sub_agent_plan") or [])
     
     r = json.loads(result)
     
@@ -214,14 +214,14 @@ def make_plan(phases: list[dict], runtime: ToolRuntime) -> Command | str:
         return r["message"]
     
     return Command(update={
-        "plan": r["plan"],
-        "messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
+        "sub_agent_plan": r["plan"],
+        "sub_agent_messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
     })
 
 
 @tool("edit_plan", description=PLAN_DESCRIPTION["edit_plan"])
 def edit_plan(updates: list[dict], runtime: ToolRuntime) -> Command | str:
-    result = _edit_plan(updates, runtime.state["plan"] or [])
+    result = _edit_plan(updates, runtime.state.get("sub_agent_plan") or [])
     
     r = json.loads(result)
     
@@ -229,8 +229,8 @@ def edit_plan(updates: list[dict], runtime: ToolRuntime) -> Command | str:
         return r["message"]
     
     return Command(update={
-        "plan": r["plan"],
-        "messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
+        "sub_agent_plan": r["plan"],
+        "sub_agent_messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
     })
 
 
@@ -240,7 +240,7 @@ def delete_plan(
     phase_id: str = "",
     delete_all: bool = False,
 ) -> Command | str:
-    result = _delete_plan(phase_id, runtime.state["plan"] or [], delete_all)
+    result = _delete_plan(phase_id, runtime.state.get("sub_agent_plan") or [], delete_all)
     
     r = json.loads(result)
     
@@ -248,8 +248,8 @@ def delete_plan(
         return r["message"]
     
     return Command(update={
-        "plan": r["plan"],
-        "messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
+        "sub_agent_plan": r["plan"],
+        "sub_agent_messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)],
     })
 
 
@@ -268,3 +268,9 @@ PROGRAMMER_BASE_TOOLS = [
     edit_plan,
     delete_plan,
 ]
+
+PROGRAMMER_CONTROL_TOOL_NAME_SET: set[str] = {
+    "make_plan",
+    "edit_plan",
+    "delete_plan",
+}

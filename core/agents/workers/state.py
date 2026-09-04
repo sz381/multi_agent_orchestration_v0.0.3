@@ -42,7 +42,7 @@ class SubAgentState(TypedDict):
     sub_agent_messages: Annotated[list, add_messages]
     sub_agent_outputs: Annotated[dict, lambda left, right: {**left, **right}]
     file_changes: Annotated[list, lambda left, right: left + [p for p in right if p not in left]]
-    prompt_token: int
+    prompt_tokens: int
     completion_tokens: int
     total_tokens: int
     sub_agent_iteration: int

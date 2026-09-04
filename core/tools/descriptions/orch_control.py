@@ -8,10 +8,12 @@ Tools described:
 
 TOOL_DESCRIPTION = {
     "end_orchestration": (
-        "Deliver the final response to the user. MUST be the last tool you call. "
+        "Close the orchestration. MUST be the last tool you call. "
         "Do NOT call any other tool after end_orchestration.\n"
         "Parameters:\n"
-        "- response: the final answer (non-empty string, max 100K chars)\n"
+        "- response: handoff note for the final announcer (non-empty string, "
+        "max 100K chars): a micro-summary of what was done plus presentation "
+        "guidance (tone, depth, emphasis) for the user-facing message\n"
         "\n"
         "Rejected if the current plan still has phases not marked 'done' — "
         "complete or delete them first."
